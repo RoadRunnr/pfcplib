@@ -39,7 +39,8 @@
 	 }).
 
 -record(downlink_data_service_information, {
-	  value :: 0..16#3f
+	  value :: 0..16#3f,
+	  qfi :: 0..16#3f
 	 }).
 
 -record(f_seid, {
@@ -53,10 +54,14 @@
 	 }).
 
 -record(pfd_contents, {
-	  flow		:: binary(),
-	  url		:: binary(),
-	  domain	:: binary(),
-	  custom	:: binary()
+	  flow			:: binary(),
+	  url			:: binary(),
+	  domain		:: binary(),
+	  custom		:: binary(),
+	  dnp			:: binary(),
+	  additional_flow	:: [binary()],
+	  additional_url	:: [binary()],
+	  additional_domain	:: [binary()]
 	 }).
 
 -record(fq_csid, {
@@ -71,7 +76,8 @@
 	 }).
 
 -record(dropped_dl_traffic_threshold, {
-	  value         :: 0..16#ffffffffffffffff
+	  packets       :: 0..16#ffffffffffffffff,
+	  bytes         :: 0..16#ffffffffffffffff
 	 }).
 
 -record(volume_quota, {
@@ -81,17 +87,20 @@
 	 }).
 
 -record(outer_header_creation, {
-	  type		:: 'GTP-U' | 'UDP',
+	  type		:: 'GTP-U' | 'UDP' | 'IP' | 'Ethernet',
 	  teid,
 	  ipv4		:: 'undefined' | inet:ip4_address(),
 	  ipv6		:: 'undefined' | inet:ip6_address(),
-	  port
+	  port		:: 0..16#ffff,
+	  ctag		:: binary(),
+	  stag		:: binary()
 	 }).
 
 -record(ue_ip_address, {
 	  type		:: 'undefined' | 'src' | 'dst',
 	  ipv4		:: 'undefined' | inet:ip4_address(),
-	  ipv6		:: 'undefined' | inet:ip6_address()
+	  ipv6		:: 'undefined' | inet:ip6_address(),
+	  ipv6_pd_bits	:: 'undefined' | 0..128
 	 }).
 
 -record(packet_rate, {
@@ -107,8 +116,10 @@
 	 }).
 
 -record(remote_gtp_u_peer, {
-	  ipv4	:: inet:ip4_address(),
-	  ipv6	:: inet:ip6_address()
+	  ipv4			:: inet:ip4_address(),
+	  ipv6			:: inet:ip6_address(),
+	  destination_interface :: atom(),
+	  network_instance	:: binary()
 	 }).
 
 -record(failed_rule_id, {
@@ -118,9 +129,9 @@
 
 -record(user_plane_ip_resource_information, {
 	  teid_range,
-	  ipv4,
-	  ipv6,
-	  network_instance
+	  ipv4			:: inet:ip4_address(),
+	  ipv6			:: inet:ip6_address(),
+	  network_instance	:: binary()
 	 }).
 
 -record(subsequent_volume_quota, {
@@ -150,13 +161,20 @@
 
 -record(user_id, {
 	  imsi		:: 'undefined' | binary(),
-	  imei		:: 'undefined' | binary()
+	  imei		:: 'undefined' | binary(),
+	  msisdn	:: 'undefined' | binary(),
+	  nai		:: 'undefined' | binary()
 	 }).
 
 -record(tp_packet_measurement, {
 	  total		:: 0..16#ffffffffffffffff,
 	  uplink	:: 0..16#ffffffffffffffff,
 	  downlink	:: 0..16#ffffffffffffffff
+	 }).
+
+-record(alternative_smf_ip_address, {
+	  ipv4	:: inet:ip4_address(),
+	  ipv6	:: inet:ip6_address()
 	 }).
 
 %% The following code is auto-generated. DO NOT EDIT
@@ -303,6 +321,8 @@
 	  time_threshold = 0,
 	  volume_threshold = 0,
 	  periodic_reporting = 0,
+	  event_quota = 0,
+	  event_threshold = 0,
 	  mac_addresses_reporting = 0,
 	  envelope_closure = 0,
 	  time_quota = 0,
@@ -311,7 +331,8 @@
 
 -record(redirect_information, {
 	  type = 'IPv4',
-	  address = <<>>
+	  address = <<>>,
+	  other_address = <<>>
 }).
 
 -record(report_type, {
@@ -342,10 +363,18 @@
 	  dlbd = 0,
 	  ddnd = 0,
 	  bucp = 0,
+	  epfar = 0,
+	  pfde = 0,
+	  frrt = 0,
+	  trace = 0,
 	  quoac = 0,
 	  udbc = 0,
 	  pdiu = 0,
-	  empu = 0
+	  empu = 0,
+	  sset = 0,
+	  ueip = 0,
+	  adpdp = 0,
+	  dpdra = 0
 }).
 
 -record(apply_action, {
@@ -427,13 +456,16 @@
 	  timth = 0,
 	  volth = 0,
 	  perio = 0,
+	  eveth = 0,
 	  macar = 0,
 	  envcl = 0,
 	  monit = 0,
 	  termr = 0,
 	  liusa = 0,
 	  timqu = 0,
-	  volqu = 0
+	  volqu = 0,
+	  tebur = 0,
+	  evequ = 0
 }).
 
 -record(measurement_period, {
@@ -517,6 +549,8 @@
 }).
 
 -record(cp_function_features, {
+	  sset = 0,
+	  epfar = 0,
 	  ovrl = 0,
 	  load = 0
 }).
@@ -538,7 +572,8 @@
 }).
 
 -record(outer_header_removal, {
-	  header = 'GTP-U/UDP/IPv4'
+	  header = 'GTP-U/UDP/IPv4',
+	  pdu_session_container = 0
 }).
 
 -record(recovery_time_stamp, {
@@ -556,6 +591,7 @@
 }).
 
 -record(measurement_information, {
+	  istm = 0,
 	  radi = 0,
 	  inam = 0,
 	  mbqe = 0
@@ -598,6 +634,7 @@
 }).
 
 -record(sx_association_release_request, {
+	  urss = 0,
 	  sarr = 0
 }).
 
@@ -716,4 +753,149 @@
 
 -record(ethernet_inactivity_timer, {
 	  timer = 0
+}).
+
+-record(additional_monitoring_time, {
+	  group
+}).
+
+-record(event_quota, {
+	  quota = 0
+}).
+
+-record(event_threshold, {
+	  threshold = 0
+}).
+
+-record(subsequent_event_quota, {
+	  quota = 0
+}).
+
+-record(subsequent_event_threshold, {
+	  threshold = 0
+}).
+
+-record(trace_information, {
+	  mccmnc,
+	  trace_id = 0,
+	  triggering_events = <<>>,
+	  session_trace_depth = 0,
+	  list_of_interfaces = <<>>,
+	  ip_address_of_trace_collection_entity = <<>>
+}).
+
+-record(framed_route, {
+	  framed_route = <<>>
+}).
+
+-record(framed_routing, {
+	  framed_routing = 0
+}).
+
+-record(framed_ipv6_route, {
+	  framed_ipv6_route = <<>>
+}).
+
+-record(event_time_stamp, {
+	  time = 0
+}).
+
+-record(averaging_window, {
+	  averaging_window = 0
+}).
+
+-record(paging_policy_indicator, {
+	  ppi = 0
+}).
+
+-record(apn_dnn, {
+	  apn_dnn
+}).
+
+-record(tgpp_interface_type, {
+	  tgpp_interface_type = 'S1-U'
+}).
+
+-record(pfcpsrreq_flags, {
+	  psdbu = 0
+}).
+
+-record(pfcpaureq_flags, {
+	  parps = 0
+}).
+
+-record(activation_time, {
+	  time = 0
+}).
+
+-record(deactivation_time, {
+	  time = 0
+}).
+
+-record(create_mar, {
+	  group
+}).
+
+-record(access_forwarding_action_information_1, {
+	  group
+}).
+
+-record(access_forwarding_action_information_2, {
+	  group
+}).
+
+-record(remove_mar, {
+	  group
+}).
+
+-record(update_mar, {
+	  group
+}).
+
+-record(mar_id, {
+	  id = 0
+}).
+
+-record(steering_functionality, {
+	  steering_functionality = 'ATSSS-LL'
+}).
+
+-record(steering_mode, {
+	  steering_mode = 'Active-Standby'
+}).
+
+-record(weight, {
+	  weight = 0
+}).
+
+-record(priority, {
+	  priority_value = 'Active'
+}).
+
+-record(update_access_forwarding_action_information_1, {
+	  group
+}).
+
+-record(update_access_forwarding_action_information_2, {
+	  group
+}).
+
+-record(ue_ip_address_pool_identity, {
+	  identity = <<>>
+}).
+
+-record(tp_build_id, {
+	  id = <<>>
+}).
+
+-record(tp_now, {
+	  now
+}).
+
+-record(tp_start, {
+	  start
+}).
+
+-record(tp_stop, {
+	  stop
 }).

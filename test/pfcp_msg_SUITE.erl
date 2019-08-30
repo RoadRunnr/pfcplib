@@ -24,7 +24,7 @@ end_per_suite(_Config) ->
 
 
 all() ->
-    [msg_enc_dec, validation].
+    [msg_enc_dec, validation, compat].
 
 %%%===================================================================
 %%% Tests
@@ -170,4 +170,30 @@ validation(_Config) ->
 			#overload_control_information{},
 			#usage_report_sdr{}]},
     ?match({'EXIT', {badarg, _}}, (catch pfcp_packet:validate('Sxb', Msg18))),
+    ok.
+
+compat() ->
+    [{doc, "Check backwads compatibility for extended IEs"}].
+compat(_Config) ->
+    %% rel. 15.2:
+    %% pfcp_packet:encode(#pfcp{version = v1, seq_no = 0,type = session_report_request, ie = [#up_function_features{}]}).
+
+    R1 = pfcp_packet:decode(<<32,56,0,10,0,0,0,0,0,43,0,2,0,0>>),
+    ?match(#pfcp{version = v1, seq_no = 0,
+		 type = session_report_request,
+		 ie = #{up_function_features := _}}, R1),
+
+    %% rel. 15.2:
+    %% pfcp_packet:encode(#pfcp{version = v1, seq_no = 0,type = session_report_request, ie = [#usage_report_trigger{}]}).
+    R2 = pfcp_packet:decode(<<32,56,0,10,0,0,0,0,0,63,0,2,0,0>>),
+    ?match(#pfcp{version = v1, seq_no = 0,
+		 type = session_report_request,
+		 ie = #{usage_report_trigger := _}}, R2),
+
+    %% rel. 15.2:
+    %% pfcp_packet:encode(#pfcp{version = v1, seq_no = 0,type = session_report_request, ie = [#outer_header_removal{}]}).
+    R3 = pfcp_packet:decode(<<32,56,0,9,0,0,0,0,0,95,0,1,0>>),
+    ?match(#pfcp{version = v1, seq_no = 0,
+		 type = session_report_request,
+		 ie = #{outer_header_removal := _}}, R3),
     ok.

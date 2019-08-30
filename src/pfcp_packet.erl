@@ -283,15 +283,27 @@ maybe_bin(Bin, Len, IE)
 maybe_bin(undefined, _, IE) ->
     IE.
 
+%% maybe_len_bin/5
 maybe_len_bin(<<Bin/binary>>, 0, _, _, IE) ->
     {IE, Bin};
-maybe_len_bin(<<Bin/binary>>, 1, Size, Pos, IE) ->
+maybe_len_bin(<<Bin/binary>>, 1, Size, Pos, IE) when is_integer(Pos) ->
     <<Len:Size/integer, V:Len/bytes, Rest/binary>> = Bin,
-    {setelement(Pos, IE, V), Rest}.
+    {setelement(Pos, IE, V), Rest};
+maybe_len_bin(<<Bin/binary>>, 1, Size, Fun, IE) when is_function(Fun, 2) ->
+    <<Len:Size/integer, V:Len/bytes, Rest/binary>> = Bin,
+    {Fun(V, IE), Rest}.
 
+%% maybe_len_bin/3
 maybe_len_bin(Bin, Size, IE) when is_binary(Bin) ->
     <<IE/binary, (byte_size(Bin)):Size/integer, Bin/bytes>>;
 maybe_len_bin(_, _, IE) ->
+    IE.
+
+%% maybe_len_array/3
+maybe_len_array(Fun, List, Size, IE) when is_list(List), is_function(Fun, 1) ->
+    Bin = Fun(List),
+    <<IE/binary, (byte_size(Bin)):Size/integer, Bin/bytes>>;
+maybe_len_array(_, _, _, IE) ->
     IE.
 
 maybe_unsigned_integer(<<Value/binary>>, 0, _, _, IE) ->
@@ -413,15 +425,18 @@ encode_volume_threshold({_Type, Total, UL, DL}) ->
     IE2 = maybe_unsigned_integer(UL, 64, IE1),
     maybe_unsigned_integer(DL, 64, IE2).
 
-decode_paging_policy_indication(<<_:7, PPI:1, Rest0/binary>>, _Type) ->
+decode_paging_policy_indication(<<_:6, QFI:1, PPI:1, Rest0/binary>>, _Type) ->
     IE0 = #downlink_data_service_information{},
-    {IE1, _Rest1} = maybe_unsigned_integer(Rest0, PPI, 8,
-					   #downlink_data_service_information.value, IE0),
-    IE1.
+    {IE1, Rest1} = maybe_unsigned_integer(Rest0, PPI, 8,
+					  #downlink_data_service_information.value, IE0),
+    {IE2, _Rest2} = maybe_unsigned_integer(Rest1, QFI, 8,
+					   #downlink_data_service_information.qfi, IE1),
+    IE2.
 
-encode_paging_policy_indication(#downlink_data_service_information{value = Value}) ->
-    IE0 = <<0:7, (is_set(Value)):1>>,
-    maybe_unsigned_integer(Value, 8, IE0).
+encode_paging_policy_indication(#downlink_data_service_information{value = Value, qfi = QFI}) ->
+    IE0 = <<0:6, (is_set(QFI)):1, (is_set(Value)):1>>,
+    IE1 = maybe_unsigned_integer(Value, 8, IE0),
+    maybe_unsigned_integer(QFI, 8, IE1).
 
 decode_f_seid(<<_:6, IPv4:1, IPv6:1, SEID:64/integer, Rest0/binary>>, _Type) ->
     IE0 = #f_seid{seid = SEID},
@@ -451,21 +466,51 @@ encode_node_id(#node_id{id = FQDN})
   when is_list(FQDN) ->
     <<0:4, 2:4, << <<(size(Part)):8, Part/binary>> || Part <- FQDN >>/binary >>.
 
-decode_pfd_contents(<<_:4, CP:1, DN:1, URL:1, FD:1, Rest0/binary>>, _Type) ->
-    IE0 = #pfd_contents{},
-    {IE1, Rest1} = maybe_len_bin(Rest0, CP, 16, #pfd_contents.flow, IE0),
-    {IE2, Rest2} = maybe_len_bin(Rest1, DN, 16, #pfd_contents.url, IE1),
-    {IE3, Rest3} = maybe_len_bin(Rest2, URL, 16, #pfd_contents.domain, IE2),
-    {IE4, _Rest4} = maybe_len_bin(Rest3, FD, 16, #pfd_contents.custom, IE3),
-    IE4.
+decode_array(Size, Binary) ->
+    [ V || <<Len:Size, V:Len/bytes>> <= Binary ].
 
-encode_pfd_contents(#pfd_contents{flow = Flow, url = URL,
-				  domain = Domain, custom = Custom}) ->
-    IE0 = <<0:4, (is_set(Flow)):1, (is_set(URL)):1, (is_set(Domain)):1, (is_set(Custom)):1>>,
+encode_array(Size, List) ->
+    << <<(size(B)):Size, B/binary>> || B <- List >>.
+
+decode_pfd_contents(<<ADNP:1, AURL:1, AFD:1, DNP:1, CP:1, DN:1, URL:1, FD:1, _Spare:8,
+		      Rest0/binary>>, _Type) ->
+    IE0 = #pfd_contents{},
+    {IE1, Rest1} = maybe_len_bin(Rest0, FD, 16, #pfd_contents.flow, IE0),
+    {IE2, Rest2} = maybe_len_bin(Rest1, URL, 16, #pfd_contents.url, IE1),
+    {IE3, Rest3} = maybe_len_bin(Rest2, DN, 16, #pfd_contents.domain, IE2),
+    {IE4, Rest4} = maybe_len_bin(Rest3, CP, 16, #pfd_contents.custom, IE3),
+    {IE5, Rest5} = maybe_len_bin(Rest4, DNP, 16, #pfd_contents.dnp, IE4),
+    {IE6, Rest6} =
+	maybe_len_bin(Rest5, AFD, 16,
+		      fun(V, IE) ->
+			      IE#pfd_contents{additional_flow = decode_array(16, V)}
+		      end, IE5),
+    {IE7, Rest7} =
+	maybe_len_bin(Rest6, AURL, 16,
+		      fun(V, IE) ->
+			      IE#pfd_contents{additional_url = decode_array(16, V)}
+		      end, IE6),
+    {IE8, _Rest8} =
+	maybe_len_bin(Rest7, ADNP, 16,
+		      fun(V, IE) ->
+			      IE#pfd_contents{additional_domain = decode_array(16, V)}
+		      end, IE7),
+    IE8.
+
+encode_pfd_contents(#pfd_contents{flow = Flow, url = URL, domain = Domain, custom = Custom,
+				  dnp = DNP, additional_flow = AFlow, additional_url = AURL,
+				  additional_domain = ADomain}) ->
+    IE0 = <<(is_set(ADomain)):1, (is_set(AURL)):1, (is_set(AFlow)):1, (is_set(DNP)):1,
+	    (is_set(Custom)):1, (is_set(Domain)):1, (is_set(URL)):1, (is_set(Flow)):1,
+	    0:8>>,
     IE1 = maybe_len_bin(Flow, 16, IE0),
     IE2 = maybe_len_bin(URL, 16, IE1),
     IE3 = maybe_len_bin(Domain, 16, IE2),
-    maybe_len_bin(Custom, 16, IE3).
+    IE4 = maybe_len_bin(Custom, 16, IE3),
+    IE5 = maybe_len_bin(DNP, 16, IE4),
+    IE6 = maybe_len_array(encode_array(16, _), AFlow, 16, IE5),
+    IE7 = maybe_len_array(encode_array(16, _), AURL, 16, IE6),
+    maybe_len_array(encode_array(16, _), ADomain, 16, IE7).
 
 decode_fq_csid(<<Type:4, Count:4, Rest0/binary>>, _Type) ->
     {IE1, Rest1} =
@@ -494,34 +539,42 @@ encode_fq_csid(#fq_csid{address = Address, csid = CSID}) ->
     ct:pal("CSID: ~p, ~p", [CSID,  << <<X:16>> || X <- CSID >>]),
     <<IE0/binary, << <<X:16>> || X <- CSID >>/binary>>.
 
-decode_dropped_dl_traffic_threshold(<<_:7, DLPA:1, Rest0/binary>>, _Type) ->
+decode_dropped_dl_traffic_threshold(<<_:6, DLBY:1, DLPA:1, Rest0/binary>>, _Type) ->
     IE0 = #dropped_dl_traffic_threshold{},
-    {IE1, _Rest1} = maybe_unsigned_integer(Rest0, DLPA, 64,
-					   #dropped_dl_traffic_threshold.value, IE0),
-    IE1.
+    {IE1, Rest1} = maybe_unsigned_integer(Rest0, DLPA, 64,
+					  #dropped_dl_traffic_threshold.packets, IE0),
+    {IE2, _Rest2} = maybe_unsigned_integer(Rest1, DLBY, 64,
+					   #dropped_dl_traffic_threshold.bytes, IE1),
+    IE2.
 
-encode_dropped_dl_traffic_threshold(#dropped_dl_traffic_threshold{value = Value}) ->
-    IE0 = <<0:7, (is_set(Value)):1>>,
-    maybe_unsigned_integer(Value, 64, IE0).
+encode_dropped_dl_traffic_threshold(#dropped_dl_traffic_threshold{
+				       packets = Packets, bytes = Bytes}) ->
+    IE0 = <<0:6, (is_set(Bytes)):1, (is_set(Packets)):1>>,
+    IE1 = maybe_unsigned_integer(Packets, 64, IE0),
+    maybe_unsigned_integer(Bytes, 64, IE1).
 
-decode_outer_header_creation(<<_:4, 0:2, IP:2, _:8, TEID:32/integer, Rest/binary>>, _Type)
-  when IP /= 0 ->
-    case {IP, Rest} of
-	{1, <<IPv4:4/bytes, _/binary>>} ->
-	    #outer_header_creation{type = 'GTP-U', teid = TEID, ipv4 = IPv4};
-	{2, <<IPv6:16/bytes, _/binary>>} ->
-	    #outer_header_creation{type = 'GTP-U', teid = TEID, ipv6 = IPv6};
-	{3, <<IPv4:4/bytes, IPv6:16/bytes, _/binary>>} ->
-	    #outer_header_creation{type = 'GTP-U', teid = TEID, ipv4 = IPv4, ipv6 = IPv6}
-    end;
-decode_outer_header_creation(<<_:4, IP:2, 0:2, _:8, Rest/binary>>, _Type)
-  when IP /= 0 ->
-    case {IP, Rest} of
-	{1, <<IPv4:4/bytes, Port:16/integer, _/binary>>} ->
-	    #outer_header_creation{type = 'UDP', ipv4 = IPv4, port = Port};
-	{2, <<IPv6:16/bytes, Port:16/integer, _/binary>>} ->
-	    #outer_header_creation{type = 'UDP', ipv6 = IPv6, port = Port}
-    end.
+decode_outer_header_creation(<<STAG:1, CTAG:1, IPv6:1, IPv4:1, UDP6:1, UDP4:1, GTP6:1, GTP4:1,
+			       _Spare:8, Rest0/binary>>, _Type) ->
+    Encap = if (GTP4 == 1 orelse GTP6 == 1) -> 'GTP-U';
+	       (UDP4 == 1 orelse UDP6 == 1) -> 'UDP';
+	       (IPv4 == 1 orelse IPv6 == 1) -> 'IP';
+	       (STAG == 1 orelse CTAG == 1) -> 'Ethernet'
+	    end,
+    IE0 = #outer_header_creation{type = Encap},
+    {IE1, Rest1} = maybe_unsigned_integer(Rest0, GTP6 bor GTP4, 32,
+					  #outer_header_creation.teid, IE0),
+    {IE2, Rest2} = maybe_bin(Rest1, IPv4 bor UDP4 bor GTP4, 4,
+			     #outer_header_creation.ipv4, IE1),
+    {IE3, Rest3} = maybe_bin(Rest2, IPv6 bor UDP6 bor GTP6, 16,
+			     #outer_header_creation.ipv6, IE2),
+    {IE4, Rest4} = maybe_unsigned_integer(Rest3, UDP6 bor UDP4, 16,
+					  #outer_header_creation.port, IE3),
+    %% C/S-Tag is defined as 3 bytes in rel 16.0. The actual 802.1q tags
+    %% are only 2 bytes, lets assume the format follows the C/S-Tag IE
+    {IE5, Rest5} = maybe_bin(Rest4, CTAG, 3, #outer_header_creation.ctag, IE4),
+    {IE6, _Rest6} = maybe_bin(Rest5, STAG, 3, #outer_header_creation.stag, IE5),
+    IE6.
+
 
 encode_outer_header_creation(#outer_header_creation{type = 'GTP-U', teid = TEID,
 						    ipv4 = IPv4, ipv6 = IPv6})
@@ -541,25 +594,67 @@ encode_outer_header_creation(#outer_header_creation{type = 'UDP', ipv4 = IPv4, p
     <<4:8, 0:8, IPv4:4/bytes, Port:16/integer>>;
 encode_outer_header_creation(#outer_header_creation{type = 'UDP', ipv6 = IPv6, port = Port})
   when ?IS_IPv6(IPv6) ->
-    <<8:8, 0:8, IPv6:16/bytes, Port:16/integer>>.
+    <<8:8, 0:8, IPv6:16/bytes, Port:16/integer>>;
 
-decode_ue_ip_address(<<_:5, Type:1, IPv4:1, IPv6:1, Rest0/binary>>, _Type) ->
+encode_outer_header_creation(#outer_header_creation{type = 'IP', ipv4 = IPv4})
+  when ?IS_IPv4(IPv4) ->
+    <<16#10:8, 0:8, IPv4:4/bytes>>;
+encode_outer_header_creation(#outer_header_creation{type = 'IP', ipv6 = IPv6})
+  when ?IS_IPv6(IPv6) ->
+    <<16#20:8, 0:8, IPv6:16/bytes>>;
+
+encode_outer_header_creation(
+  #outer_header_creation{type = 'Ethernet', ctag = CTAG, stag = STAG})
+  when is_binary(CTAG) orelse is_binary(STAG) ->
+    IE0 = <<(is_set(STAG)):1, (is_set(CTAG)):1, 0:6, 0:8>>,
+    IE1 = maybe_bin(CTAG, 3, IE0),
+    maybe_bin(STAG, 3, IE1).
+
+decode_ue_ip_address(<<_:3, Ch:1, IPv6D:1, Type:1, IPv4:1, IPv6:1, Rest0/binary>>, _Type)
+  when Ch =:= 1 ->
+    IE0 = if Type =:= 0 -> #ue_ip_address{type = src};
+	     true ->       #ue_ip_address{type = dst}
+	  end,
+    IE1 = IE0#ue_ip_address{
+	    ipv4 = maybe_atom(IPv4, choose),
+	    ipv6 = maybe_atom(IPv6, choose)
+	   },
+    {IE2, _Rest2} = maybe_unsigned_integer(Rest0, IPv6D, 8, #ue_ip_address.ipv6_pd_bits, IE1),
+    IE2;
+
+decode_ue_ip_address(<<_:3, Ch:1, IPv6D:1, Type:1, IPv4:1, IPv6:1, Rest0/binary>>, _Type)
+  when Ch =:= 0 ->
     IE0 = if Type =:= 0 -> #ue_ip_address{type = src};
 	     true ->       #ue_ip_address{type = dst}
 	  end,
     {IE1, Rest1} = maybe_bin(Rest0, IPv4, 4, #ue_ip_address.ipv4, IE0),
-    {IE2, _Rest2} = maybe_bin(Rest1, IPv6, 16, #ue_ip_address.ipv6, IE1),
-    IE2.
+    {IE2, Rest2} = maybe_bin(Rest1, IPv6, 16, #ue_ip_address.ipv6, IE1),
+    {IE3, _Rest3} = maybe_unsigned_integer(Rest2, IPv6D, 8, #ue_ip_address.ipv6_pd_bits, IE2),
+    IE3.
 
-encode_ue_ip_address(#ue_ip_address{type = Type, ipv4 = IPv4, ipv6 = IPv6}) ->
+encode_ue_ip_address(#ue_ip_address{type = Type, ipv4 = IPv4, ipv6 = IPv6,
+				    ipv6_pd_bits = IPv6D})
+  when IPv4 =:= choose orelse IPv6 =:= choose ->
     SD = case Type of
 	     src -> 0;
 	     dst -> 1;
 	     undefined -> 0
 	 end,
-    IE0 = <<0:5, SD:1, (is_set(IPv4)):1, (is_set(IPv6)):1>>,
+    IE0 = <<0:3, 1:1, (is_set(IPv6D)):1, SD:1,
+	    (is_set(IPv4, choose)):1,
+	    (is_set(IPv6, choose)):1>>,
+    maybe_unsigned_integer(IPv6D, 8, IE0);
+encode_ue_ip_address(#ue_ip_address{type = Type, ipv4 = IPv4, ipv6 = IPv6,
+				    ipv6_pd_bits = IPv6D}) ->
+    SD = case Type of
+	     src -> 0;
+	     dst -> 1;
+	     undefined -> 0
+	 end,
+    IE0 = <<0:3, 0:1, (is_set(IPv6D)):1, SD:1, (is_set(IPv4)):1, (is_set(IPv6)):1>>,
     IE1 = maybe_bin(IPv4, 4, IE0),
-    maybe_bin(IPv6, 16, IE1).
+    IE2 = maybe_bin(IPv6, 16, IE1),
+    maybe_unsigned_integer(IPv6D, 8, IE2).
 
 enum_v1_packet_rate_unit('minute') -> 0;
 enum_v1_packet_rate_unit('6 minutes') -> 1;
@@ -621,16 +716,42 @@ encode_dl_flow_level_marking(#dl_flow_level_marking{
     IE1 = maybe_bin(TTC, 2, IE0),
     maybe_bin(SCI, 2, IE1).
 
-decode_remote_peer(<<_:6, IPv4:1, IPv6:1, Rest0/binary>>, _Type) ->
+decode_remote_peer(<<_:4, NI:1, DI:1, IPv4:1, IPv6:1, Rest0/binary>>, _Type) ->
     IE0 = #remote_gtp_u_peer{},
     {IE1, Rest1} = maybe_bin(Rest0, IPv4, 4, #remote_gtp_u_peer.ipv4, IE0),
-    {IE2, _Rest2} = maybe_bin(Rest1, IPv6, 16, #remote_gtp_u_peer.ipv6, IE1),
-    IE2.
+    {IE2, Rest2} = maybe_bin(Rest1, IPv6, 16, #remote_gtp_u_peer.ipv6, IE1),
+    {IE3, Rest3} =
+	case Rest2 of
+	    <<DiLen0:16, _:4, V:4, NRest3a/binary>> when DiLen0 > 0, DI == 1 ->
+		DiLen = DiLen0 - 1,
+		<<_:DiLen/bytes, NRest3/binary>> = NRest3a,
+		{IE2#remote_gtp_u_peer{
+		   destination_interface = enum_v1_interface(V)}, NRest3};
+	    _ when DI == 0 ->
+		{IE2, Rest2}
+	end,
+    {IE4, _Rest4} = maybe_len_bin(Rest3, NI, 16, #remote_gtp_u_peer.network_instance, IE3),
+    IE4.
 
-encode_remote_peer(#remote_gtp_u_peer{ipv4 = IPv4, ipv6 = IPv6}) ->
-    IE0 = <<0:6, (is_set(IPv4)):1, (is_set(IPv6)):1>>,
+encode_remote_peer(#remote_gtp_u_peer{ipv4 = IPv4, ipv6 = IPv6,
+				      destination_interface = DI,
+				      network_instance = NI}) ->
+    IE0 = <<0:4, (is_set(NI)):1, (is_set(DI)):1, (is_set(IPv4)):1, (is_set(IPv6)):1>>,
     IE1 = maybe_bin(IPv4, 4, IE0),
-    maybe_bin(IPv6, 16, IE1).
+    IE2 = maybe_bin(IPv6, 16, IE1),
+    IE3 = case DI of
+	      undefined ->
+		  IE2;
+	      _ ->
+		  <<IE2/binary, 1:16, 0:4, (enum_v1_interface(DI)):4>>
+	  end,
+    maybe_len_bin(NI, 16, IE3).
+
+decode_sntp_timestamp(<<Seconds:32/integer, Fraction:32/integer>>) ->
+    {Seconds, Fraction}.
+
+encode_sntp_timestamp({Seconds, Fraction}) ->
+    <<Seconds:32, Fraction:32>>.
 
 decode_failed_rule_id(<<_:4, 0:4, Id:16/integer, _/binary>>, _Type) ->
     #failed_rule_id{type = pdr, id = Id};
@@ -726,17 +847,87 @@ encode_vlan_tag({_Type, PCP, DEI, VID}) ->
       (if_set(is_set(PCP), PCP, 0)):3,
       (if_set(is_set(VID), is_integer(VID) andalso (VID band 16#ff), 0)):8>>.
 
-decode_user_id(<<_:6, IMEI:1, IMSI:1, Rest0/binary>>, _Type) ->
+decode_user_id(<<_:4, NAI:1, MSISDN:1, IMEI:1, IMSI:1, Rest0/binary>>, _Type) ->
     IE0 = #user_id{},
     {IE1, Rest1} = maybe_len_bin(Rest0, IMSI, 8, #user_id.imsi, IE0),
-    {IE2, _}     = maybe_len_bin(Rest1, IMEI, 8, #user_id.imei, IE1),
-    IE2.
+    {IE2, Rest2} = maybe_len_bin(Rest1, IMEI, 8, #user_id.imei, IE1),
+    {IE3, Rest3} = maybe_len_bin(Rest2, MSISDN, 8, #user_id.msisdn, IE2),
+    {IE4, _} = maybe_len_bin(Rest3, NAI, 8, #user_id.nai, IE3),
+    IE4.
 
-encode_user_id(#user_id{imsi = IMSI, imei = IMEI}) ->
-    IE0 = <<0:6,
+encode_user_id(#user_id{imsi = IMSI, imei = IMEI, msisdn = MSISDN, nai = NAI}) ->
+    IE0 = <<0:4,
+	    (is_set(NAI)):1, (is_set(MSISDN)):1,
 	    (is_set(IMEI)):1, (is_set(IMSI)):1>>,
     IE1 = maybe_len_bin(IMSI, 8, IE0),
-    maybe_len_bin(IMEI, 8, IE1).
+    IE2 = maybe_len_bin(IMEI, 8, IE1),
+    IE3 = maybe_len_bin(MSISDN, 8, IE2),
+    maybe_len_bin(NAI, 8, IE3).
+
+decode_tbcd(Bin) ->
+    decode_tbcd(Bin, <<>>).
+
+tbcd_to_string(10)  -> $*;
+tbcd_to_string(11)  -> $#;
+tbcd_to_string(12)  -> $a;
+tbcd_to_string(13)  -> $b;
+tbcd_to_string(14)  -> $c;
+tbcd_to_string(BCD) -> BCD + $0.
+
+decode_tbcd(<<>>, BCD) ->
+    BCD;
+decode_tbcd(<<_:4, 15:4, _/binary>>, BCD) ->
+    BCD;
+decode_tbcd(<<15:4, Lo:4, _/binary>>, BCD) ->
+    <<BCD/binary, (tbcd_to_string(Lo))>>;
+decode_tbcd(<<Hi:4, Lo:4, Next/binary>>, BCD) ->
+    decode_tbcd(Next, <<BCD/binary, (tbcd_to_string(Lo)), (tbcd_to_string(Hi))>>).
+
+string_to_tbcd($*) -> 10;
+string_to_tbcd($#) -> 11;
+string_to_tbcd($a) -> 12;
+string_to_tbcd($b) -> 13;
+string_to_tbcd($c) -> 14;
+string_to_tbcd(15) -> 15;
+string_to_tbcd(BCD) -> BCD - $0.
+
+decode_v1_mccmnc(<<MCCHi:8, MNC3:4, MCC3:4, MNCHi:8>>) ->
+    {decode_tbcd(<<MCCHi:8, 15:4, MCC3:4>>), decode_tbcd(<<MNCHi:8, 15:4, MNC3:4>>)}.
+
+encode_v1_mccmnc({MCC, MNC}) ->
+    [MCC1, MCC2, MCC3 | _] = [ string_to_tbcd(X) || <<X:8>> <= MCC] ++ [15,15,15],
+    [MNC1, MNC2, MNC3 | _] = [ string_to_tbcd(X) || <<X:8>> <= MNC] ++ [15,15,15],
+    <<MCC2:4, MCC1:4, MNC3:4, MCC3:4, MNC2:4, MNC1:4>>.
+
+decode_smf_ip_address(<<_:6, IPv4:1, IPv6:1, Rest0/binary>>, _Type) ->
+    IE0 = #alternative_smf_ip_address{},
+    {IE1, Rest1} = maybe_bin(Rest0, IPv4, 4, #alternative_smf_ip_address.ipv4, IE0),
+    {IE2, _Rest2} = maybe_bin(Rest1, IPv6, 16, #alternative_smf_ip_address.ipv6, IE1),
+    IE2.
+
+encode_smf_ip_address(#alternative_smf_ip_address{ipv4 = IPv4, ipv6 = IPv6}) ->
+    IE0 = <<0:6, (is_set(IPv4)):1, (is_set(IPv6)):1>>,
+    IE1 = maybe_bin(IPv4, 4, IE0),
+    maybe_bin(IPv6, 16, IE1).
+
+decode_fqdn(FQDN) ->
+    [ Part || <<Len:8, Part:Len/bytes>> <= FQDN ].
+
+encode_fqdn(FQDN) ->
+    << <<(size(Part)):8, Part/binary>> || Part <- FQDN >>.
+
+%% decode up_function_features
+decode_v1_element_fallback(<<_:16/bits>> = Value, 43) ->
+    decode_v1_element(<<Value/binary, 0:8>>, 43);
+%% decode usage_report_trigger
+decode_v1_element_fallback(<<_:16/bits>> = Value, 63) ->
+    decode_v1_element(<<Value/binary, 0:8>>, 63);
+%% decode outer_header_removal
+decode_v1_element_fallback(<<_:8/bits>> = Value, 95) ->
+    decode_v1_element(<<Value/binary, 0:8>>, 95);
+
+decode_v1_element_fallback(Value, Tag) ->
+    {Tag, Value}.
 
 %% The following code is auto-generated. DO NOT EDIT
 
@@ -815,6 +1006,66 @@ message_type_v1(56) -> session_report_request;
 message_type_v1(57) -> session_report_response;
 message_type_v1(Type) -> error(badarg, [Type]).
 
+enum_v1_priority_value('Active') -> 0;
+enum_v1_priority_value('Standby') -> 1;
+enum_v1_priority_value('High') -> 2;
+enum_v1_priority_value('Low') -> 3;
+enum_v1_priority_value(0) -> 'Active';
+enum_v1_priority_value(1) -> 'Standby';
+enum_v1_priority_value(2) -> 'High';
+enum_v1_priority_value(3) -> 'Low';
+enum_v1_priority_value(X) when is_integer(X) -> X.
+
+enum_v1_steering_mode('Active-Standby') -> 0;
+enum_v1_steering_mode('Smallest Delay') -> 1;
+enum_v1_steering_mode('Load Balancing') -> 2;
+enum_v1_steering_mode('Priority-based') -> 3;
+enum_v1_steering_mode(0) -> 'Active-Standby';
+enum_v1_steering_mode(1) -> 'Smallest Delay';
+enum_v1_steering_mode(2) -> 'Load Balancing';
+enum_v1_steering_mode(3) -> 'Priority-based';
+enum_v1_steering_mode(X) when is_integer(X) -> X.
+
+enum_v1_steering_functionality('ATSSS-LL') -> 0;
+enum_v1_steering_functionality('MPTCP') -> 1;
+enum_v1_steering_functionality(0) -> 'ATSSS-LL';
+enum_v1_steering_functionality(1) -> 'MPTCP';
+enum_v1_steering_functionality(X) when is_integer(X) -> X.
+
+enum_v1_tgpp_interface_type('S1-U') -> 0;
+enum_v1_tgpp_interface_type('S5/S8-U') -> 1;
+enum_v1_tgpp_interface_type('S4-U') -> 2;
+enum_v1_tgpp_interface_type('S11-U') -> 3;
+enum_v1_tgpp_interface_type('S12-U') -> 4;
+enum_v1_tgpp_interface_type('Gn/Gp-U') -> 5;
+enum_v1_tgpp_interface_type('S2a-U') -> 6;
+enum_v1_tgpp_interface_type('S2b-U') -> 7;
+enum_v1_tgpp_interface_type('eNodeB GTP-U interface for DL data forwarding') -> 8;
+enum_v1_tgpp_interface_type('eNodeB GTP-U interface for UL data forwarding') -> 9;
+enum_v1_tgpp_interface_type('SGW/UPF GTP-U interface for DL data forwarding') -> 10;
+enum_v1_tgpp_interface_type('N3 3GPP Access') -> 11;
+enum_v1_tgpp_interface_type('N3 Trusted Non-3GPP Access') -> 12;
+enum_v1_tgpp_interface_type('N3 Untrusted Non-3GPP Access') -> 13;
+enum_v1_tgpp_interface_type('N3 for data forwarding') -> 14;
+enum_v1_tgpp_interface_type('N9') -> 15;
+enum_v1_tgpp_interface_type(0) -> 'S1-U';
+enum_v1_tgpp_interface_type(1) -> 'S5/S8-U';
+enum_v1_tgpp_interface_type(2) -> 'S4-U';
+enum_v1_tgpp_interface_type(3) -> 'S11-U';
+enum_v1_tgpp_interface_type(4) -> 'S12-U';
+enum_v1_tgpp_interface_type(5) -> 'Gn/Gp-U';
+enum_v1_tgpp_interface_type(6) -> 'S2a-U';
+enum_v1_tgpp_interface_type(7) -> 'S2b-U';
+enum_v1_tgpp_interface_type(8) -> 'eNodeB GTP-U interface for DL data forwarding';
+enum_v1_tgpp_interface_type(9) -> 'eNodeB GTP-U interface for UL data forwarding';
+enum_v1_tgpp_interface_type(10) -> 'SGW/UPF GTP-U interface for DL data forwarding';
+enum_v1_tgpp_interface_type(11) -> 'N3 3GPP Access';
+enum_v1_tgpp_interface_type(12) -> 'N3 Trusted Non-3GPP Access';
+enum_v1_tgpp_interface_type(13) -> 'N3 Untrusted Non-3GPP Access';
+enum_v1_tgpp_interface_type(14) -> 'N3 for data forwarding';
+enum_v1_tgpp_interface_type(15) -> 'N9';
+enum_v1_tgpp_interface_type(X) when is_integer(X) -> X.
+
 enum_v1_base_time_interval_type('CTP') -> 0;
 enum_v1_base_time_interval_type('DTP') -> 1;
 enum_v1_base_time_interval_type(0) -> 'CTP';
@@ -853,10 +1104,20 @@ enum_v1_header('GTP-U/UDP/IPv4') -> 0;
 enum_v1_header('GTP-U/UDP/IPv6') -> 1;
 enum_v1_header('UDP/IPv4') -> 2;
 enum_v1_header('UDP/IPv6') -> 3;
+enum_v1_header('IPv4') -> 4;
+enum_v1_header('IPv6') -> 5;
+enum_v1_header('GTP-U/UDP/IP') -> 6;
+enum_v1_header('VLAN S-TAG') -> 7;
+enum_v1_header('S-TAG and C-TAG') -> 8;
 enum_v1_header(0) -> 'GTP-U/UDP/IPv4';
 enum_v1_header(1) -> 'GTP-U/UDP/IPv6';
 enum_v1_header(2) -> 'UDP/IPv4';
 enum_v1_header(3) -> 'UDP/IPv6';
+enum_v1_header(4) -> 'IPv4';
+enum_v1_header(5) -> 'IPv6';
+enum_v1_header(6) -> 'GTP-U/UDP/IP';
+enum_v1_header(7) -> 'VLAN S-TAG';
+enum_v1_header(8) -> 'S-TAG and C-TAG';
 enum_v1_header(X) when is_integer(X) -> X.
 
 enum_v1_direction('Unspecified') -> 0;
@@ -911,10 +1172,12 @@ enum_v1_type('IPv4') -> 0;
 enum_v1_type('IPv6') -> 1;
 enum_v1_type('URL') -> 2;
 enum_v1_type('SIP URI') -> 3;
+enum_v1_type('IPv4 and IPv6') -> 4;
 enum_v1_type(0) -> 'IPv4';
 enum_v1_type(1) -> 'IPv6';
 enum_v1_type(2) -> 'URL';
 enum_v1_type(3) -> 'SIP URI';
+enum_v1_type(4) -> 'IPv4 and IPv6';
 enum_v1_type(X) when is_integer(X) -> X.
 
 enum_v1_dl('OPEN') -> 0;
@@ -1135,7 +1398,9 @@ decode_v1_element(<<M_linked_usage_reporting:1/integer,
 		    M_time_threshold:1/integer,
 		    M_volume_threshold:1/integer,
 		    M_periodic_reporting:1/integer,
-		    _:4,
+		    _:2,
+		    M_event_quota:1/integer,
+		    M_event_threshold:1/integer,
 		    M_mac_addresses_reporting:1/integer,
 		    M_envelope_closure:1/integer,
 		    M_time_quota:1/integer,
@@ -1149,6 +1414,8 @@ decode_v1_element(<<M_linked_usage_reporting:1/integer,
 			time_threshold = M_time_threshold,
 			volume_threshold = M_volume_threshold,
 			periodic_reporting = M_periodic_reporting,
+			event_quota = M_event_quota,
+			event_threshold = M_event_threshold,
 			mac_addresses_reporting = M_mac_addresses_reporting,
 			envelope_closure = M_envelope_closure,
 			time_quota = M_time_quota,
@@ -1158,9 +1425,11 @@ decode_v1_element(<<M_linked_usage_reporting:1/integer,
 decode_v1_element(<<_:4,
 		    M_type:4/integer,
 		    M_address_len:16/integer, M_address:M_address_len/bytes,
+		    M_other_address_len:16/integer, M_other_address:M_other_address_len/bytes,
 		    _/binary>>, 38) ->
     #redirect_information{type = enum_v1_type(M_type),
-			  address = M_address};
+			  address = M_address,
+			  other_address = M_other_address};
 
 %% decode report_type
 decode_v1_element(<<_:4,
@@ -1198,11 +1467,19 @@ decode_v1_element(<<M_treu:1/integer,
 		    M_dlbd:1/integer,
 		    M_ddnd:1/integer,
 		    M_bucp:1/integer,
-		    _:4,
+		    M_epfar:1/integer,
+		    M_pfde:1/integer,
+		    M_frrt:1/integer,
+		    M_trace:1/integer,
 		    M_quoac:1/integer,
 		    M_udbc:1/integer,
 		    M_pdiu:1/integer,
 		    M_empu:1/integer,
+		    _:4,
+		    M_sset:1/integer,
+		    M_ueip:1/integer,
+		    M_adpdp:1/integer,
+		    M_dpdra:1/integer,
 		    _/binary>>, 43) ->
     #up_function_features{treu = M_treu,
 			  heeu = M_heeu,
@@ -1212,10 +1489,18 @@ decode_v1_element(<<M_treu:1/integer,
 			  dlbd = M_dlbd,
 			  ddnd = M_ddnd,
 			  bucp = M_bucp,
+			  epfar = M_epfar,
+			  pfde = M_pfde,
+			  frrt = M_frrt,
+			  trace = M_trace,
 			  quoac = M_quoac,
 			  udbc = M_udbc,
 			  pdiu = M_pdiu,
-			  empu = M_empu};
+			  empu = M_empu,
+			  sset = M_sset,
+			  ueip = M_ueip,
+			  adpdp = M_adpdp,
+			  dpdra = M_dpdra};
 
 %% decode apply_action
 decode_v1_element(<<_:3,
@@ -1334,7 +1619,7 @@ decode_v1_element(<<M_immer:1/integer,
 		    M_timth:1/integer,
 		    M_volth:1/integer,
 		    M_perio:1/integer,
-		    _:1,
+		    M_eveth:1/integer,
 		    M_macar:1/integer,
 		    M_envcl:1/integer,
 		    M_monit:1/integer,
@@ -1342,6 +1627,9 @@ decode_v1_element(<<M_immer:1/integer,
 		    M_liusa:1/integer,
 		    M_timqu:1/integer,
 		    M_volqu:1/integer,
+		    _:6,
+		    M_tebur:1/integer,
+		    M_evequ:1/integer,
 		    _/binary>>, 63) ->
     #usage_report_trigger{immer = M_immer,
 			  droth = M_droth,
@@ -1351,13 +1639,16 @@ decode_v1_element(<<M_immer:1/integer,
 			  timth = M_timth,
 			  volth = M_volth,
 			  perio = M_perio,
+			  eveth = M_eveth,
 			  macar = M_macar,
 			  envcl = M_envcl,
 			  monit = M_monit,
 			  termr = M_termr,
 			  liusa = M_liusa,
 			  timqu = M_timqu,
-			  volqu = M_volqu};
+			  volqu = M_volqu,
+			  tebur = M_tebur,
+			  evequ = M_evequ};
 
 %% decode measurement_period
 decode_v1_element(<<M_period:32/integer,
@@ -1471,11 +1762,15 @@ decode_v1_element(<<M_id:8/integer,
     #bar_id{id = M_id};
 
 %% decode cp_function_features
-decode_v1_element(<<_:6,
+decode_v1_element(<<_:4,
+		    M_sset:1/integer,
+		    M_epfar:1/integer,
 		    M_ovrl:1/integer,
 		    M_load:1/integer,
 		    _/binary>>, 89) ->
-    #cp_function_features{ovrl = M_ovrl,
+    #cp_function_features{sset = M_sset,
+			  epfar = M_epfar,
+			  ovrl = M_ovrl,
 			  load = M_load};
 
 %% decode usage_information
@@ -1512,8 +1807,11 @@ decode_v1_element(<<Data/binary>>, 94) ->
 
 %% decode outer_header_removal
 decode_v1_element(<<M_header:8/integer,
+		    _:7,
+		    M_pdu_session_container:1/integer,
 		    _/binary>>, 95) ->
-    #outer_header_removal{header = enum_v1_header(M_header)};
+    #outer_header_removal{header = enum_v1_header(M_header),
+			  pdu_session_container = M_pdu_session_container};
 
 %% decode recovery_time_stamp
 decode_v1_element(<<M_time:32/integer,
@@ -1539,12 +1837,14 @@ decode_v1_element(<<M_group/binary>>, 99) ->
     #error_indication_report{group = decode_v1_grouped(M_group)};
 
 %% decode measurement_information
-decode_v1_element(<<_:5,
+decode_v1_element(<<_:4,
+		    M_istm:1/integer,
 		    M_radi:1/integer,
 		    M_inam:1/integer,
 		    M_mbqe:1/integer,
 		    _/binary>>, 100) ->
-    #measurement_information{radi = M_radi,
+    #measurement_information{istm = M_istm,
+			     radi = M_radi,
 			     inam = M_inam,
 			     mbqe = M_mbqe};
 
@@ -1595,10 +1895,12 @@ decode_v1_element(<<_:7,
     #oci_flags{aoci = M_aoci};
 
 %% decode sx_association_release_request
-decode_v1_element(<<_:7,
+decode_v1_element(<<_:6,
+		    M_urss:1/integer,
 		    M_sarr:1/integer,
 		    _/binary>>, 111) ->
-    #sx_association_release_request{sarr = M_sarr};
+    #sx_association_release_request{urss = M_urss,
+				    sarr = M_sarr};
 
 %% decode graceful_release_period
 decode_v1_element(<<M_release_timer_unit:3/integer,
@@ -1664,7 +1966,8 @@ decode_v1_element(<<_:7,
     #rqi{rqi = M_rqi};
 
 %% decode qfi
-decode_v1_element(<<M_qfi:8/integer,
+decode_v1_element(<<_:2,
+		    M_qfi:6/integer,
 		    _/binary>>, 124) ->
     #qfi{qfi = M_qfi};
 
@@ -1777,12 +2080,190 @@ decode_v1_element(<<M_timer:32/integer,
 		    _/binary>>, 146) ->
     #ethernet_inactivity_timer{timer = M_timer};
 
+%% decode additional_monitoring_time
+decode_v1_element(<<M_group/binary>>, 147) ->
+    #additional_monitoring_time{group = decode_v1_grouped(M_group)};
+
+%% decode event_quota
+decode_v1_element(<<M_quota:32/integer,
+		    _/binary>>, 148) ->
+    #event_quota{quota = M_quota};
+
+%% decode event_threshold
+decode_v1_element(<<M_threshold:32/integer,
+		    _/binary>>, 149) ->
+    #event_threshold{threshold = M_threshold};
+
+%% decode subsequent_event_quota
+decode_v1_element(<<M_quota:32/integer,
+		    _/binary>>, 150) ->
+    #subsequent_event_quota{quota = M_quota};
+
+%% decode subsequent_event_threshold
+decode_v1_element(<<M_threshold:32/integer,
+		    _/binary>>, 151) ->
+    #subsequent_event_threshold{threshold = M_threshold};
+
+%% decode trace_information
+decode_v1_element(<<M_mccmnc:24/bits,
+		    M_trace_id:24/integer,
+		    M_triggering_events_len:8/integer, M_triggering_events:M_triggering_events_len/bytes,
+		    M_session_trace_depth:8/integer,
+		    M_list_of_interfaces_len:8/integer, M_list_of_interfaces:M_list_of_interfaces_len/bytes,
+		    M_ip_address_of_trace_collection_entity_len:8/integer, M_ip_address_of_trace_collection_entity:M_ip_address_of_trace_collection_entity_len/bytes,
+		    _/binary>>, 152) ->
+    #trace_information{mccmnc = decode_v1_mccmnc(M_mccmnc),
+		       trace_id = M_trace_id,
+		       triggering_events = M_triggering_events,
+		       session_trace_depth = M_session_trace_depth,
+		       list_of_interfaces = M_list_of_interfaces,
+		       ip_address_of_trace_collection_entity = M_ip_address_of_trace_collection_entity};
+
+%% decode framed_route
+decode_v1_element(<<M_framed_route/binary>>, 153) ->
+    #framed_route{framed_route = M_framed_route};
+
+%% decode framed_routing
+decode_v1_element(<<M_framed_routing:32/integer>>, 154) ->
+    #framed_routing{framed_routing = M_framed_routing};
+
+%% decode framed_ipv6_route
+decode_v1_element(<<M_framed_ipv6_route/binary>>, 155) ->
+    #framed_ipv6_route{framed_ipv6_route = M_framed_ipv6_route};
+
+%% decode event_time_stamp
+decode_v1_element(<<M_time:32/integer,
+		    _/binary>>, 156) ->
+    #event_time_stamp{time = M_time};
+
+%% decode averaging_window
+decode_v1_element(<<M_averaging_window:32/integer,
+		    _/binary>>, 157) ->
+    #averaging_window{averaging_window = M_averaging_window};
+
+%% decode paging_policy_indicator
+decode_v1_element(<<_:4,
+		    M_ppi:4/integer,
+		    _/binary>>, 158) ->
+    #paging_policy_indicator{ppi = M_ppi};
+
+%% decode apn_dnn
+decode_v1_element(<<M_apn_dnn/binary>>, 159) ->
+    #apn_dnn{apn_dnn = decode_fqdn(M_apn_dnn)};
+
+%% decode tgpp_interface_type
+decode_v1_element(<<_:2,
+		    M_tgpp_interface_type:6/integer,
+		    _/binary>>, 160) ->
+    #tgpp_interface_type{tgpp_interface_type = enum_v1_tgpp_interface_type(M_tgpp_interface_type)};
+
+%% decode pfcpsrreq_flags
+decode_v1_element(<<_:7,
+		    M_psdbu:1/integer,
+		    _/binary>>, 161) ->
+    #pfcpsrreq_flags{psdbu = M_psdbu};
+
+%% decode pfcpaureq_flags
+decode_v1_element(<<_:7,
+		    M_parps:1/integer,
+		    _/binary>>, 162) ->
+    #pfcpaureq_flags{parps = M_parps};
+
+%% decode activation_time
+decode_v1_element(<<M_time:32/integer,
+		    _/binary>>, 163) ->
+    #activation_time{time = M_time};
+
+%% decode deactivation_time
+decode_v1_element(<<M_time:32/integer,
+		    _/binary>>, 164) ->
+    #deactivation_time{time = M_time};
+
+%% decode create_mar
+decode_v1_element(<<M_group/binary>>, 165) ->
+    #create_mar{group = decode_v1_grouped(M_group)};
+
+%% decode access_forwarding_action_information_1
+decode_v1_element(<<M_group/binary>>, 166) ->
+    #access_forwarding_action_information_1{group = decode_v1_grouped(M_group)};
+
+%% decode access_forwarding_action_information_2
+decode_v1_element(<<M_group/binary>>, 167) ->
+    #access_forwarding_action_information_2{group = decode_v1_grouped(M_group)};
+
+%% decode remove_mar
+decode_v1_element(<<M_group/binary>>, 168) ->
+    #remove_mar{group = decode_v1_grouped(M_group)};
+
+%% decode update_mar
+decode_v1_element(<<M_group/binary>>, 169) ->
+    #update_mar{group = decode_v1_grouped(M_group)};
+
+%% decode mar_id
+decode_v1_element(<<M_id:16/integer,
+		    _/binary>>, 170) ->
+    #mar_id{id = M_id};
+
+%% decode steering_functionality
+decode_v1_element(<<_:4,
+		    M_steering_functionality:4/integer,
+		    _/binary>>, 171) ->
+    #steering_functionality{steering_functionality = enum_v1_steering_functionality(M_steering_functionality)};
+
+%% decode steering_mode
+decode_v1_element(<<_:4,
+		    M_steering_mode:4/integer,
+		    _/binary>>, 172) ->
+    #steering_mode{steering_mode = enum_v1_steering_mode(M_steering_mode)};
+
+%% decode weight
+decode_v1_element(<<M_weight:8/integer>>, 173) ->
+    #weight{weight = M_weight};
+
+%% decode priority
+decode_v1_element(<<_:4,
+		    M_priority_value:4/integer,
+		    _/binary>>, 174) ->
+    #priority{priority_value = enum_v1_priority_value(M_priority_value)};
+
+%% decode update_access_forwarding_action_information_1
+decode_v1_element(<<M_group/binary>>, 175) ->
+    #update_access_forwarding_action_information_1{group = decode_v1_grouped(M_group)};
+
+%% decode update_access_forwarding_action_information_2
+decode_v1_element(<<M_group/binary>>, 176) ->
+    #update_access_forwarding_action_information_2{group = decode_v1_grouped(M_group)};
+
+%% decode ue_ip_address_pool_identity
+decode_v1_element(<<M_identity/binary>>, 177) ->
+    #ue_ip_address_pool_identity{identity = M_identity};
+
+%% decode alternative_smf_ip_address
+decode_v1_element(<<Data/binary>>, 178) ->
+    decode_smf_ip_address(Data, alternative_smf_ip_address);
+
 %% decode tp_packet_measurement
 decode_v1_element(<<Data/binary>>, {18681,1}) ->
     decode_volume_threshold(Data, tp_packet_measurement);
 
+%% decode tp_build_id
+decode_v1_element(<<M_id/binary>>, {18681,2}) ->
+    #tp_build_id{id = M_id};
+
+%% decode tp_now
+decode_v1_element(<<M_now:64/bits>>, {18681,3}) ->
+    #tp_now{now = decode_sntp_timestamp(M_now)};
+
+%% decode tp_start
+decode_v1_element(<<M_start:64/bits>>, {18681,4}) ->
+    #tp_start{start = decode_sntp_timestamp(M_start)};
+
+%% decode tp_stop
+decode_v1_element(<<M_stop:64/bits>>, {18681,5}) ->
+    #tp_stop{stop = decode_sntp_timestamp(M_stop)};
+
 decode_v1_element(Value, Tag) ->
-    {Tag, Value}.
+    decode_v1_element_fallback(Value, Tag).
 
 encode_v1_element(#create_pdr{
 		       group = M_group}, Acc) ->
@@ -1941,6 +2422,8 @@ encode_v1_element(#reporting_triggers{
 		       time_threshold = M_time_threshold,
 		       volume_threshold = M_volume_threshold,
 		       periodic_reporting = M_periodic_reporting,
+		       event_quota = M_event_quota,
+		       event_threshold = M_event_threshold,
 		       mac_addresses_reporting = M_mac_addresses_reporting,
 		       envelope_closure = M_envelope_closure,
 		       time_quota = M_time_quota,
@@ -1953,7 +2436,9 @@ encode_v1_element(#reporting_triggers{
 		     M_time_threshold:1,
 		     M_volume_threshold:1,
 		     M_periodic_reporting:1,
-		     0:4,
+		     0:2,
+		     M_event_quota:1,
+		     M_event_threshold:1,
 		     M_mac_addresses_reporting:1,
 		     M_envelope_closure:1,
 		     M_time_quota:1,
@@ -1961,10 +2446,12 @@ encode_v1_element(#reporting_triggers{
 
 encode_v1_element(#redirect_information{
 		       type = M_type,
-		       address = M_address}, Acc) ->
+		       address = M_address,
+		       other_address = M_other_address}, Acc) ->
     encode_tlv(38, <<0:4,
 		     (enum_v1_type(M_type)):4/integer,
-		     (byte_size(M_address)):16/integer, M_address/binary>>, Acc);
+		     (byte_size(M_address)):16/integer, M_address/binary,
+		     (byte_size(M_other_address)):16/integer, M_other_address/binary>>, Acc);
 
 encode_v1_element(#report_type{
 		       upir = M_upir,
@@ -1999,10 +2486,18 @@ encode_v1_element(#up_function_features{
 		       dlbd = M_dlbd,
 		       ddnd = M_ddnd,
 		       bucp = M_bucp,
+		       epfar = M_epfar,
+		       pfde = M_pfde,
+		       frrt = M_frrt,
+		       trace = M_trace,
 		       quoac = M_quoac,
 		       udbc = M_udbc,
 		       pdiu = M_pdiu,
-		       empu = M_empu}, Acc) ->
+		       empu = M_empu,
+		       sset = M_sset,
+		       ueip = M_ueip,
+		       adpdp = M_adpdp,
+		       dpdra = M_dpdra}, Acc) ->
     encode_tlv(43, <<M_treu:1,
 		     M_heeu:1,
 		     M_pfdm:1,
@@ -2011,11 +2506,19 @@ encode_v1_element(#up_function_features{
 		     M_dlbd:1,
 		     M_ddnd:1,
 		     M_bucp:1,
-		     0:4,
+		     M_epfar:1,
+		     M_pfde:1,
+		     M_frrt:1,
+		     M_trace:1,
 		     M_quoac:1,
 		     M_udbc:1,
 		     M_pdiu:1,
-		     M_empu:1>>, Acc);
+		     M_empu:1,
+		     0:4,
+		     M_sset:1,
+		     M_ueip:1,
+		     M_adpdp:1,
+		     M_dpdra:1>>, Acc);
 
 encode_v1_element(#apply_action{
 		       dupl = M_dupl,
@@ -2122,13 +2625,16 @@ encode_v1_element(#usage_report_trigger{
 		       timth = M_timth,
 		       volth = M_volth,
 		       perio = M_perio,
+		       eveth = M_eveth,
 		       macar = M_macar,
 		       envcl = M_envcl,
 		       monit = M_monit,
 		       termr = M_termr,
 		       liusa = M_liusa,
 		       timqu = M_timqu,
-		       volqu = M_volqu}, Acc) ->
+		       volqu = M_volqu,
+		       tebur = M_tebur,
+		       evequ = M_evequ}, Acc) ->
     encode_tlv(63, <<M_immer:1,
 		     M_droth:1,
 		     M_stopt:1,
@@ -2137,14 +2643,17 @@ encode_v1_element(#usage_report_trigger{
 		     M_timth:1,
 		     M_volth:1,
 		     M_perio:1,
-		     0:1,
+		     M_eveth:1,
 		     M_macar:1,
 		     M_envcl:1,
 		     M_monit:1,
 		     M_termr:1,
 		     M_liusa:1,
 		     M_timqu:1,
-		     M_volqu:1>>, Acc);
+		     M_volqu:1,
+		     0:6,
+		     M_tebur:1,
+		     M_evequ:1>>, Acc);
 
 encode_v1_element(#measurement_period{
 		       period = M_period}, Acc) ->
@@ -2242,9 +2751,13 @@ encode_v1_element(#bar_id{
     encode_tlv(88, <<M_id:8>>, Acc);
 
 encode_v1_element(#cp_function_features{
+		       sset = M_sset,
+		       epfar = M_epfar,
 		       ovrl = M_ovrl,
 		       load = M_load}, Acc) ->
-    encode_tlv(89, <<0:6,
+    encode_tlv(89, <<0:4,
+		     M_sset:1,
+		     M_epfar:1,
 		     M_ovrl:1,
 		     M_load:1>>, Acc);
 
@@ -2277,8 +2790,11 @@ encode_v1_element(#packet_rate{} = IE, Acc) ->
     encode_tlv(94, encode_packet_rate(IE), Acc);
 
 encode_v1_element(#outer_header_removal{
-		       header = M_header}, Acc) ->
-    encode_tlv(95, <<(enum_v1_header(M_header)):8/integer>>, Acc);
+		       header = M_header,
+		       pdu_session_container = M_pdu_session_container}, Acc) ->
+    encode_tlv(95, <<(enum_v1_header(M_header)):8/integer,
+		     0:7,
+		     M_pdu_session_container:1>>, Acc);
 
 encode_v1_element(#recovery_time_stamp{
 		       time = M_time}, Acc) ->
@@ -2301,10 +2817,12 @@ encode_v1_element(#error_indication_report{
     encode_tlv(99, <<(encode_v1_grouped(M_group))/binary>>, Acc);
 
 encode_v1_element(#measurement_information{
+		       istm = M_istm,
 		       radi = M_radi,
 		       inam = M_inam,
 		       mbqe = M_mbqe}, Acc) ->
-    encode_tlv(100, <<0:5,
+    encode_tlv(100, <<0:4,
+		      M_istm:1,
 		      M_radi:1,
 		      M_inam:1,
 		      M_mbqe:1>>, Acc);
@@ -2351,8 +2869,10 @@ encode_v1_element(#oci_flags{
 		      M_aoci:1>>, Acc);
 
 encode_v1_element(#sx_association_release_request{
+		       urss = M_urss,
 		       sarr = M_sarr}, Acc) ->
-    encode_tlv(111, <<0:7,
+    encode_tlv(111, <<0:6,
+		      M_urss:1,
 		      M_sarr:1>>, Acc);
 
 encode_v1_element(#graceful_release_period{
@@ -2411,7 +2931,8 @@ encode_v1_element(#rqi{
 
 encode_v1_element(#qfi{
 		       qfi = M_qfi}, Acc) ->
-    encode_tlv(124, <<M_qfi:8>>, Acc);
+    encode_tlv(124, <<0:2,
+		      M_qfi:6>>, Acc);
 
 encode_v1_element(#query_urr_reference{
 		       reference = M_reference}, Acc) ->
@@ -2504,8 +3025,168 @@ encode_v1_element(#ethernet_inactivity_timer{
 		       timer = M_timer}, Acc) ->
     encode_tlv(146, <<M_timer:32>>, Acc);
 
+encode_v1_element(#additional_monitoring_time{
+		       group = M_group}, Acc) ->
+    encode_tlv(147, <<(encode_v1_grouped(M_group))/binary>>, Acc);
+
+encode_v1_element(#event_quota{
+		       quota = M_quota}, Acc) ->
+    encode_tlv(148, <<M_quota:32>>, Acc);
+
+encode_v1_element(#event_threshold{
+		       threshold = M_threshold}, Acc) ->
+    encode_tlv(149, <<M_threshold:32>>, Acc);
+
+encode_v1_element(#subsequent_event_quota{
+		       quota = M_quota}, Acc) ->
+    encode_tlv(150, <<M_quota:32>>, Acc);
+
+encode_v1_element(#subsequent_event_threshold{
+		       threshold = M_threshold}, Acc) ->
+    encode_tlv(151, <<M_threshold:32>>, Acc);
+
+encode_v1_element(#trace_information{
+		       mccmnc = M_mccmnc,
+		       trace_id = M_trace_id,
+		       triggering_events = M_triggering_events,
+		       session_trace_depth = M_session_trace_depth,
+		       list_of_interfaces = M_list_of_interfaces,
+		       ip_address_of_trace_collection_entity = M_ip_address_of_trace_collection_entity}, Acc) ->
+    encode_tlv(152, <<(encode_v1_mccmnc(M_mccmnc)):24/bits,
+		      M_trace_id:24,
+		      (byte_size(M_triggering_events)):8/integer, M_triggering_events/binary,
+		      M_session_trace_depth:8,
+		      (byte_size(M_list_of_interfaces)):8/integer, M_list_of_interfaces/binary,
+		      (byte_size(M_ip_address_of_trace_collection_entity)):8/integer, M_ip_address_of_trace_collection_entity/binary>>, Acc);
+
+encode_v1_element(#framed_route{
+		       framed_route = M_framed_route}, Acc) ->
+    encode_tlv(153, <<M_framed_route/binary>>, Acc);
+
+encode_v1_element(#framed_routing{
+		       framed_routing = M_framed_routing}, Acc) ->
+    encode_tlv(154, <<M_framed_routing:32>>, Acc);
+
+encode_v1_element(#framed_ipv6_route{
+		       framed_ipv6_route = M_framed_ipv6_route}, Acc) ->
+    encode_tlv(155, <<M_framed_ipv6_route/binary>>, Acc);
+
+encode_v1_element(#event_time_stamp{
+		       time = M_time}, Acc) ->
+    encode_tlv(156, <<M_time:32>>, Acc);
+
+encode_v1_element(#averaging_window{
+		       averaging_window = M_averaging_window}, Acc) ->
+    encode_tlv(157, <<M_averaging_window:32>>, Acc);
+
+encode_v1_element(#paging_policy_indicator{
+		       ppi = M_ppi}, Acc) ->
+    encode_tlv(158, <<0:4,
+		      M_ppi:4>>, Acc);
+
+encode_v1_element(#apn_dnn{
+		       apn_dnn = M_apn_dnn}, Acc) ->
+    encode_tlv(159, <<(encode_fqdn(M_apn_dnn))/binary>>, Acc);
+
+encode_v1_element(#tgpp_interface_type{
+		       tgpp_interface_type = M_tgpp_interface_type}, Acc) ->
+    encode_tlv(160, <<0:2,
+		      (enum_v1_tgpp_interface_type(M_tgpp_interface_type)):6/integer>>, Acc);
+
+encode_v1_element(#pfcpsrreq_flags{
+		       psdbu = M_psdbu}, Acc) ->
+    encode_tlv(161, <<0:7,
+		      M_psdbu:1>>, Acc);
+
+encode_v1_element(#pfcpaureq_flags{
+		       parps = M_parps}, Acc) ->
+    encode_tlv(162, <<0:7,
+		      M_parps:1>>, Acc);
+
+encode_v1_element(#activation_time{
+		       time = M_time}, Acc) ->
+    encode_tlv(163, <<M_time:32>>, Acc);
+
+encode_v1_element(#deactivation_time{
+		       time = M_time}, Acc) ->
+    encode_tlv(164, <<M_time:32>>, Acc);
+
+encode_v1_element(#create_mar{
+		       group = M_group}, Acc) ->
+    encode_tlv(165, <<(encode_v1_grouped(M_group))/binary>>, Acc);
+
+encode_v1_element(#access_forwarding_action_information_1{
+		       group = M_group}, Acc) ->
+    encode_tlv(166, <<(encode_v1_grouped(M_group))/binary>>, Acc);
+
+encode_v1_element(#access_forwarding_action_information_2{
+		       group = M_group}, Acc) ->
+    encode_tlv(167, <<(encode_v1_grouped(M_group))/binary>>, Acc);
+
+encode_v1_element(#remove_mar{
+		       group = M_group}, Acc) ->
+    encode_tlv(168, <<(encode_v1_grouped(M_group))/binary>>, Acc);
+
+encode_v1_element(#update_mar{
+		       group = M_group}, Acc) ->
+    encode_tlv(169, <<(encode_v1_grouped(M_group))/binary>>, Acc);
+
+encode_v1_element(#mar_id{
+		       id = M_id}, Acc) ->
+    encode_tlv(170, <<M_id:16>>, Acc);
+
+encode_v1_element(#steering_functionality{
+		       steering_functionality = M_steering_functionality}, Acc) ->
+    encode_tlv(171, <<0:4,
+		      (enum_v1_steering_functionality(M_steering_functionality)):4/integer>>, Acc);
+
+encode_v1_element(#steering_mode{
+		       steering_mode = M_steering_mode}, Acc) ->
+    encode_tlv(172, <<0:4,
+		      (enum_v1_steering_mode(M_steering_mode)):4/integer>>, Acc);
+
+encode_v1_element(#weight{
+		       weight = M_weight}, Acc) ->
+    encode_tlv(173, <<M_weight:8>>, Acc);
+
+encode_v1_element(#priority{
+		       priority_value = M_priority_value}, Acc) ->
+    encode_tlv(174, <<0:4,
+		      (enum_v1_priority_value(M_priority_value)):4/integer>>, Acc);
+
+encode_v1_element(#update_access_forwarding_action_information_1{
+		       group = M_group}, Acc) ->
+    encode_tlv(175, <<(encode_v1_grouped(M_group))/binary>>, Acc);
+
+encode_v1_element(#update_access_forwarding_action_information_2{
+		       group = M_group}, Acc) ->
+    encode_tlv(176, <<(encode_v1_grouped(M_group))/binary>>, Acc);
+
+encode_v1_element(#ue_ip_address_pool_identity{
+		       identity = M_identity}, Acc) ->
+    encode_tlv(177, <<M_identity/binary>>, Acc);
+
+encode_v1_element(#alternative_smf_ip_address{} = IE, Acc) ->
+    encode_tlv(178, encode_smf_ip_address(IE), Acc);
+
 encode_v1_element(#tp_packet_measurement{} = IE, Acc) ->
     encode_tlv({18681,1}, encode_volume_threshold(IE), Acc);
+
+encode_v1_element(#tp_build_id{
+		       id = M_id}, Acc) ->
+    encode_tlv({18681,2}, <<M_id/binary>>, Acc);
+
+encode_v1_element(#tp_now{
+		       now = M_now}, Acc) ->
+    encode_tlv({18681,3}, <<(encode_sntp_timestamp(M_now)):64/bits>>, Acc);
+
+encode_v1_element(#tp_start{
+		       start = M_start}, Acc) ->
+    encode_tlv({18681,4}, <<(encode_sntp_timestamp(M_start)):64/bits>>, Acc);
+
+encode_v1_element(#tp_stop{
+		       stop = M_stop}, Acc) ->
+    encode_tlv({18681,5}, <<(encode_sntp_timestamp(M_stop)):64/bits>>, Acc);
 
 encode_v1_element(IEs, Acc) when is_list(IEs) ->
     encode_v1(IEs, Acc);
@@ -2659,7 +3340,43 @@ encode_v1_element({Tag, Value}, Acc) when is_binary(Value) ->
 ?PRETTY_PRINT(pretty_print_v1, mac_addresses_detected);
 ?PRETTY_PRINT(pretty_print_v1, mac_addresses_removed);
 ?PRETTY_PRINT(pretty_print_v1, ethernet_inactivity_timer);
+?PRETTY_PRINT(pretty_print_v1, additional_monitoring_time);
+?PRETTY_PRINT(pretty_print_v1, event_quota);
+?PRETTY_PRINT(pretty_print_v1, event_threshold);
+?PRETTY_PRINT(pretty_print_v1, subsequent_event_quota);
+?PRETTY_PRINT(pretty_print_v1, subsequent_event_threshold);
+?PRETTY_PRINT(pretty_print_v1, trace_information);
+?PRETTY_PRINT(pretty_print_v1, framed_route);
+?PRETTY_PRINT(pretty_print_v1, framed_routing);
+?PRETTY_PRINT(pretty_print_v1, framed_ipv6_route);
+?PRETTY_PRINT(pretty_print_v1, event_time_stamp);
+?PRETTY_PRINT(pretty_print_v1, averaging_window);
+?PRETTY_PRINT(pretty_print_v1, paging_policy_indicator);
+?PRETTY_PRINT(pretty_print_v1, apn_dnn);
+?PRETTY_PRINT(pretty_print_v1, tgpp_interface_type);
+?PRETTY_PRINT(pretty_print_v1, pfcpsrreq_flags);
+?PRETTY_PRINT(pretty_print_v1, pfcpaureq_flags);
+?PRETTY_PRINT(pretty_print_v1, activation_time);
+?PRETTY_PRINT(pretty_print_v1, deactivation_time);
+?PRETTY_PRINT(pretty_print_v1, create_mar);
+?PRETTY_PRINT(pretty_print_v1, access_forwarding_action_information_1);
+?PRETTY_PRINT(pretty_print_v1, access_forwarding_action_information_2);
+?PRETTY_PRINT(pretty_print_v1, remove_mar);
+?PRETTY_PRINT(pretty_print_v1, update_mar);
+?PRETTY_PRINT(pretty_print_v1, mar_id);
+?PRETTY_PRINT(pretty_print_v1, steering_functionality);
+?PRETTY_PRINT(pretty_print_v1, steering_mode);
+?PRETTY_PRINT(pretty_print_v1, weight);
+?PRETTY_PRINT(pretty_print_v1, priority);
+?PRETTY_PRINT(pretty_print_v1, update_access_forwarding_action_information_1);
+?PRETTY_PRINT(pretty_print_v1, update_access_forwarding_action_information_2);
+?PRETTY_PRINT(pretty_print_v1, ue_ip_address_pool_identity);
+?PRETTY_PRINT(pretty_print_v1, alternative_smf_ip_address);
 ?PRETTY_PRINT(pretty_print_v1, tp_packet_measurement);
+?PRETTY_PRINT(pretty_print_v1, tp_build_id);
+?PRETTY_PRINT(pretty_print_v1, tp_now);
+?PRETTY_PRINT(pretty_print_v1, tp_start);
+?PRETTY_PRINT(pretty_print_v1, tp_stop);
 pretty_print_v1(_, _) ->
     no.
 
@@ -2676,18 +3393,22 @@ v1_msg_defs() ->
 		  user_plane_ip_resource_information =>
 		      {'O',user_plane_ip_resource_information}},
 	    association_setup_response =>
-		#{cp_function_features => {'C',cp_function_features},
+		#{alternative_smf_ip_address => {'O',alternative_smf_ip_address},
+		  cp_function_features => {'C',cp_function_features},
 		  node_id => {'M',node_id},
 		  pfcp_cause => {'M',pfcp_cause},
 		  recovery_time_stamp => {'M',recovery_time_stamp},
+		  ue_ip_address_pool_identity => {'O',ue_ip_address_pool_identity},
 		  up_function_features => {'C',up_function_features},
 		  user_plane_ip_resource_information =>
 		      {'O',user_plane_ip_resource_information}},
 	    association_update_request =>
-		#{cp_function_features => {'O',cp_function_features},
+		#{alternative_smf_ip_address => {'O',alternative_smf_ip_address},
+		  cp_function_features => {'O',cp_function_features},
 		  graceful_release_period => {'O',graceful_release_period},
 		  node_id => {'M',node_id},
 		  pfcp_association_release_request => {'O',pfcp_association_release_request},
+		  pfcpaureq_flags => {'O',pfcpaureq_flags},
 		  up_function_features => {'O',up_function_features},
 		  user_plane_ip_resource_information =>
 		      {'O',user_plane_ip_resource_information}},
@@ -2766,7 +3487,7 @@ v1_msg_defs() ->
 					  {'C',transport_level_marking}}}}},
 		  create_pdr =>
 		      {'M',
-			  #{activate_predefined_rules_ => {'C',activate_predefined_rules_},
+			  #{activate_predefined_rules => {'C',activate_predefined_rules},
 			    far_id => {'C',far_id},
 			    outer_header_removal => {'C',outer_header_removal},
 			    pdi =>
@@ -2825,9 +3546,7 @@ v1_msg_defs() ->
 		      {'C',
 			  #{additional_monitoring_time =>
 				{'O',
-				    #{event_quota => {'O',event_quota},
-				      event_threshold => {'O',event_threshold},
-				      monitoring_time => {'M',monitoring_time},
+				    #{monitoring_time => {'M',monitoring_time},
 				      subsequent_time_quota => {'O',subsequent_time_quota},
 				      subsequent_time_threshold =>
 					  {'O',subsequent_time_threshold},
@@ -2838,11 +3557,16 @@ v1_msg_defs() ->
 			    dropped_dl_traffic_threshold =>
 				{'C',dropped_dl_traffic_threshold},
 			    ethernet_inactivity_timer => {'C',ethernet_inactivity_timer},
+			    event_information =>
+				{'O',
+				    #{event_id => {'O',event_id},
+				      event_quota => {'O',event_quota},
+				      event_threshold => {'O',event_threshold}}},
 			    event_quota => {'C',event_quota},
 			    event_threshold => {'C',event_threshold},
 			    far_id => {'C',far_id},
 			    inactivity_detection_time => {'C',inactivity_detection_time},
-			    linked_urr_id_ => {'C',linked_urr_id_},
+			    linked_urr_id => {'C',linked_urr_id},
 			    measurement_information => {'C',measurement_information},
 			    measurement_method => {'M',measurement_method},
 			    measurement_period => {'C',measurement_period},
@@ -2867,7 +3591,29 @@ v1_msg_defs() ->
 		  user_id => {'O',user_id},
 		  user_plane_inactivity_timer => {'O',user_plane_inactivity_timer}},
 	    session_establishment_response =>
-		#{created_pdr => {'C',#{f_teid => {'C',f_teid},pdr_id => {'M',pdr_id}}},
+		#{apn_dnn => {'O',apn_dnn},
+		  create_mar =>
+		      {'C',
+			  #{access_forwarding_action_information_1 =>
+				{'C',
+				    #{far_id => {'M',far_id},
+				      priority => {'C',priority},
+				      urr_id => {'C',urr_id},
+				      weight => {'C',weight}}},
+			    access_forwarding_action_information_2 =>
+				{'C',
+				    #{far_id => {'M',far_id},
+				      priority => {'C',priority},
+				      urr_id => {'C',urr_id},
+				      weight => {'C',weight}}},
+			    mar_id => {'M',mar_id},
+			    steering_functionality => {'M',steering_functionality},
+			    steering_mode => {'M',steering_mode}}},
+		  created_pdr =>
+		      {'C',
+			  #{f_teid => {'C',f_teid},
+			    pdr_id => {'M',pdr_id},
+			    ue_ip_address => {'C',ue_ip_address}}},
 		  created_traffic_endpoint =>
 		      {'C',
 			  #{f_teid => {'C',f_teid},
@@ -2913,12 +3659,30 @@ v1_msg_defs() ->
 				      outer_header_creation => {'C',outer_header_creation},
 				      proxying => {'C',proxying},
 				      redirect_information => {'C',redirect_information},
+				      tgpp_interface_type => {'C',tgpp_interface_type},
 				      traffic_endpoint_id => {'C',traffic_endpoint_id},
 				      transport_level_marking =>
 					  {'C',transport_level_marking}}}}},
+		  create_mar =>
+		      {'C',
+			  #{access_forwarding_action_information_1 =>
+				{'M',
+				    #{far_id => {'M',far_id},
+				      priority => {'C',priority},
+				      urr_id => {'C',urr_id},
+				      weight => {'C',weight}}},
+			    access_forwarding_action_information_2 =>
+				{'M',
+				    #{far_id => {'M',far_id},
+				      priority => {'C',priority},
+				      urr_id => {'C',urr_id},
+				      weight => {'C',weight}}},
+			    mar_id => {'M',mar_id},
+			    steering_functionality => {'M',steering_functionality},
+			    steering_mode => {'M',steering_mode}}},
 		  create_pdr =>
 		      {'C',
-			  #{activate_predefined_rules_ => {'C',activate_predefined_rules_},
+			  #{activate_predefined_rules => {'C',activate_predefined_rules},
 			    far_id => {'C',far_id},
 			    outer_header_removal => {'C',outer_header_removal},
 			    pdi =>
@@ -2994,7 +3758,7 @@ v1_msg_defs() ->
 			    event_threshold => {'C',event_threshold},
 			    far_id => {'C',far_id},
 			    inactivity_detection_time => {'C',inactivity_detection_time},
-			    linked_urr_id_ => {'C',linked_urr_id_},
+			    linked_urr_id => {'C',linked_urr_id},
 			    measurement_information => {'C',measurement_information},
 			    measurement_method => {'M',measurement_method},
 			    measurement_period => {'C',measurement_period},
@@ -3017,6 +3781,7 @@ v1_msg_defs() ->
 		  query_urr_reference => {'O',query_urr_reference},
 		  remove_bar => {'C',#{bar_id => {'M',bar_id}}},
 		  remove_far => {'C',#{far_id => {'M',far_id}}},
+		  remove_mar => {'C',#{mar_id => {'M',mar_id}}},
 		  remove_pdr => {'C',#{pdr_id => {'M',pdr_id}}},
 		  remove_qer => {'C',#{qer_id => {'M',qer_id}}},
 		  remove_traffic_endpoint =>
@@ -3052,14 +3817,43 @@ v1_msg_defs() ->
 				      outer_header_creation => {'C',outer_header_creation},
 				      redirect_information => {'C',redirect_information},
 				      sxsmreq_flags => {'C',sxsmreq_flags},
+				      tgpp_interface_type => {'C',tgpp_interface_type},
 				      traffic_endpoint_id => {'C',traffic_endpoint_id},
 				      transport_level_marking =>
 					  {'C',transport_level_marking}}}}},
+		  update_mar =>
+		      {'C',
+			  #{access_forwarding_action_information_1 =>
+				{'C',
+				    #{far_id => {'M',far_id},
+				      priority => {'C',priority},
+				      urr_id => {'C',urr_id},
+				      weight => {'C',weight}}},
+			    access_forwarding_action_information_2 =>
+				{'C',
+				    #{far_id => {'M',far_id},
+				      priority => {'C',priority},
+				      urr_id => {'C',urr_id},
+				      weight => {'C',weight}}},
+			    mar_id => {'M',mar_id},
+			    steering_functionality => {'C',steering_functionality},
+			    steering_mode => {'C',steering_mode},
+			    update_access_forwarding_action_information_1 =>
+				{'C',
+				    #{far_id => {'C',far_id},
+				      priority => {'C',priority},
+				      urr_id => {'C',urr_id},
+				      weight => {'C',weight}}},
+			    update_access_forwarding_action_information_2 =>
+				{'C',
+				    #{far_id => {'C',far_id},
+				      priority => {'C',priority},
+				      urr_id => {'C',urr_id},
+				      weight => {'C',weight}}}}},
 		  update_pdr =>
 		      {'C',
-			  #{activate_predefined_rules_ => {'C',activate_predefined_rules_},
-			    deactivate_predefined_rules_ =>
-				{'C',deactivate_predefined_rules_},
+			  #{activate_predefined_rules => {'C',activate_predefined_rules},
+			    deactivate_predefined_rules => {'C',deactivate_predefined_rules},
 			    far_id => {'C',far_id},
 			    outer_header_removal => {'C',outer_header_removal},
 			    pdi =>
@@ -3114,7 +3908,18 @@ v1_msg_defs() ->
 			    ue_ip_address => {'C',ue_ip_address}}},
 		  update_urr =>
 		      {'C',
-			  #{additional_monitoring_time => {'O',additional_monitoring_time},
+			  #{additional_monitoring_time =>
+				{'O',
+				    #{event_quota => {'O',event_quota},
+				      event_threshold => {'O',event_threshold},
+				      monitoring_time => {'M',monitoring_time},
+				      subsequent_time_quota => {'O',subsequent_time_quota},
+				      subsequent_time_threshold =>
+					  {'O',subsequent_time_threshold},
+				      subsequent_volume_quota =>
+					  {'O',subsequent_volume_quota},
+				      subsequent_volume_threshold =>
+					  {'O',subsequent_volume_threshold}}},
 			    dropped_dl_traffic_threshold =>
 				{'C',dropped_dl_traffic_threshold},
 			    ethernet_inactivity_timer => {'C',ethernet_inactivity_timer},
@@ -3122,7 +3927,7 @@ v1_msg_defs() ->
 			    event_threshold => {'C',event_threshold},
 			    far_id => {'C',far_id},
 			    inactivity_detection_time => {'C',inactivity_detection_time},
-			    linked_urr_id_ => {'C',linked_urr_id_},
+			    linked_urr_id => {'C',linked_urr_id},
 			    measurement_information => {'C',measurement_information},
 			    measurement_method => {'C',measurement_method},
 			    measurement_period => {'C',measurement_period},
@@ -3144,12 +3949,26 @@ v1_msg_defs() ->
 	    session_modification_response =>
 		#{additional_usage_reports_information =>
 		      {'C',additional_usage_reports_information},
-		  created_pdr => {'C',created_pdr},
-		  created_traffic_endpoint => {'C',created_traffic_endpoint},
+		  created_pdr =>
+		      {'C',
+			  #{f_teid => {'C',f_teid},
+			    pdr_id => {'M',pdr_id},
+			    ue_ip_address => {'C',ue_ip_address}}},
+		  created_traffic_endpoint =>
+		      {'C',
+			  #{f_teid => {'C',f_teid},
+			    traffic_endpoint_id => {'M',traffic_endpoint_id}}},
 		  failed_rule_id => {'C',failed_rule_id},
-		  load_control_information => {'O',load_control_information},
+		  load_control_information =>
+		      {'O',
+			  #{metric => {'M',metric},sequence_number => {'M',sequence_number}}},
 		  offending_ie => {'C',offending_ie},
-		  overload_control_information => {'O',overload_control_information},
+		  overload_control_information =>
+		      {'O',
+			  #{metric => {'M',metric},
+			    oci_flags => {'C',oci_flags},
+			    sequence_number => {'M',sequence_number},
+			    timer => {'M',timer}}},
 		  pfcp_cause => {'M',pfcp_cause},
 		  usage_report_smr =>
 		      {'C',
@@ -3177,6 +3996,7 @@ v1_msg_defs() ->
 		  error_indication_report => {'C',#{f_teid => {'M',f_teid}}},
 		  load_control_information => {'O',load_control_information},
 		  overload_control_information => {'O',overload_control_information},
+		  pfcpsrreq_flags => {'C',pfcpsrreq_flags},
 		  report_type => {'M',report_type},
 		  usage_report_srr =>
 		      {'C',
@@ -3192,7 +4012,7 @@ v1_msg_defs() ->
 				{'C',
 				    #{mac_addresses_detected => {'C',mac_addresses_detected},
 				      mac_addresses_removed => {'C',mac_addresses_removed}}},
-			    event_time_stamp_ => {'C',event_time_stamp_},
+			    event_time_stamp => {'C',event_time_stamp},
 			    network_instance => {'C',network_instance},
 			    query_urr_reference => {'C',query_urr_reference},
 			    start_time => {'C',start_time},
@@ -3205,7 +4025,9 @@ v1_msg_defs() ->
 			    usage_report_trigger => {'M',usage_report_trigger},
 			    volume_measurement => {'C',volume_measurement}}}},
 	    session_report_response =>
-		#{offending_ie => {'C',offending_ie},
+		#{f_seid => {'O',f_seid},
+		  f_teid => {'O',f_teid},
+		  offending_ie => {'C',offending_ie},
 		  pfcp_cause => {'M',pfcp_cause},
 		  sxsrrsp_flags => {'C',sxsrrsp_flags},
 		  update_bar =>
@@ -3231,18 +4053,22 @@ v1_msg_defs() ->
 		  user_plane_ip_resource_information =>
 		      {'O',user_plane_ip_resource_information}},
 	    association_setup_response =>
-		#{cp_function_features => {'C',cp_function_features},
+		#{alternative_smf_ip_address => {'O',alternative_smf_ip_address},
+		  cp_function_features => {'C',cp_function_features},
 		  node_id => {'M',node_id},
 		  pfcp_cause => {'M',pfcp_cause},
 		  recovery_time_stamp => {'M',recovery_time_stamp},
+		  ue_ip_address_pool_identity => {'O',ue_ip_address_pool_identity},
 		  up_function_features => {'C',up_function_features},
 		  user_plane_ip_resource_information =>
 		      {'O',user_plane_ip_resource_information}},
 	    association_update_request =>
-		#{cp_function_features => {'O',cp_function_features},
+		#{alternative_smf_ip_address => {'O',alternative_smf_ip_address},
+		  cp_function_features => {'O',cp_function_features},
 		  graceful_release_period => {'O',graceful_release_period},
 		  node_id => {'M',node_id},
 		  pfcp_association_release_request => {'O',pfcp_association_release_request},
+		  pfcpaureq_flags => {'O',pfcpaureq_flags},
 		  up_function_features => {'O',up_function_features},
 		  user_plane_ip_resource_information =>
 		      {'O',user_plane_ip_resource_information}},
@@ -3332,6 +4158,7 @@ v1_msg_defs() ->
 					  {'O',subsequent_volume_threshold}}},
 			    dropped_dl_traffic_threshold =>
 				{'C',dropped_dl_traffic_threshold},
+			    event_information => {'O',#{}},
 			    measurement_method => {'M',measurement_method},
 			    measurement_period => {'C',measurement_period},
 			    monitoring_time => {'O',monitoring_time},
@@ -3347,7 +4174,8 @@ v1_msg_defs() ->
 		  trace_information => {'O',trace_information},
 		  user_id => {'O',user_id}},
 	    session_establishment_response =>
-		#{created_pdr => {'C',#{f_teid => {'C',f_teid},pdr_id => {'M',pdr_id}}},
+		#{apn_dnn => {'O',apn_dnn},
+		  created_pdr => {'C',#{f_teid => {'C',f_teid},pdr_id => {'M',pdr_id}}},
 		  created_traffic_endpoint =>
 		      {'C',
 			  #{f_teid => {'C',f_teid},
@@ -3390,6 +4218,7 @@ v1_msg_defs() ->
 				    #{destination_interface => {'M',destination_interface},
 				      network_instance => {'O',network_instance},
 				      outer_header_creation => {'C',outer_header_creation},
+				      tgpp_interface_type => {'C',tgpp_interface_type},
 				      traffic_endpoint_id => {'C',traffic_endpoint_id},
 				      transport_level_marking =>
 					  {'C',transport_level_marking}}}}},
@@ -3464,6 +4293,7 @@ v1_msg_defs() ->
 				      network_instance => {'C',network_instance},
 				      outer_header_creation => {'C',outer_header_creation},
 				      sxsmreq_flags => {'C',sxsmreq_flags},
+				      tgpp_interface_type => {'C',tgpp_interface_type},
 				      traffic_endpoint_id => {'C',traffic_endpoint_id},
 				      transport_level_marking =>
 					  {'C',transport_level_marking}}}}},
@@ -3486,7 +4316,13 @@ v1_msg_defs() ->
 			    traffic_endpoint_id => {'M',traffic_endpoint_id}}},
 		  update_urr =>
 		      {'C',
-			  #{additional_monitoring_time => {'O',additional_monitoring_time},
+			  #{additional_monitoring_time =>
+				{'O',
+				    #{monitoring_time => {'M',monitoring_time},
+				      subsequent_time_threshold =>
+					  {'O',subsequent_time_threshold},
+				      subsequent_volume_threshold =>
+					  {'O',subsequent_volume_threshold}}},
 			    dropped_dl_traffic_threshold =>
 				{'C',dropped_dl_traffic_threshold},
 			    measurement_method => {'C',measurement_method},
@@ -3501,12 +4337,22 @@ v1_msg_defs() ->
 	    session_modification_response =>
 		#{additional_usage_reports_information =>
 		      {'C',additional_usage_reports_information},
-		  created_pdr => {'C',created_pdr},
-		  created_traffic_endpoint => {'C',created_traffic_endpoint},
+		  created_pdr => {'C',#{f_teid => {'C',f_teid},pdr_id => {'M',pdr_id}}},
+		  created_traffic_endpoint =>
+		      {'C',
+			  #{f_teid => {'C',f_teid},
+			    traffic_endpoint_id => {'M',traffic_endpoint_id}}},
 		  failed_rule_id => {'C',failed_rule_id},
-		  load_control_information => {'O',load_control_information},
+		  load_control_information =>
+		      {'O',
+			  #{metric => {'M',metric},sequence_number => {'M',sequence_number}}},
 		  offending_ie => {'C',offending_ie},
-		  overload_control_information => {'O',overload_control_information},
+		  overload_control_information =>
+		      {'O',
+			  #{metric => {'M',metric},
+			    oci_flags => {'C',oci_flags},
+			    sequence_number => {'M',sequence_number},
+			    timer => {'M',timer}}},
 		  pfcp_cause => {'M',pfcp_cause},
 		  usage_report_smr =>
 		      {'C',
@@ -3530,6 +4376,7 @@ v1_msg_defs() ->
 		  error_indication_report => {'C',#{f_teid => {'M',f_teid}}},
 		  load_control_information => {'O',load_control_information},
 		  overload_control_information => {'O',overload_control_information},
+		  pfcpsrreq_flags => {'C',pfcpsrreq_flags},
 		  report_type => {'M',report_type},
 		  usage_report_srr =>
 		      {'C',
@@ -3573,18 +4420,22 @@ v1_msg_defs() ->
 		  user_plane_ip_resource_information =>
 		      {'O',user_plane_ip_resource_information}},
 	    association_setup_response =>
-		#{cp_function_features => {'C',cp_function_features},
+		#{alternative_smf_ip_address => {'O',alternative_smf_ip_address},
+		  cp_function_features => {'C',cp_function_features},
 		  node_id => {'M',node_id},
 		  pfcp_cause => {'M',pfcp_cause},
 		  recovery_time_stamp => {'M',recovery_time_stamp},
+		  ue_ip_address_pool_identity => {'O',ue_ip_address_pool_identity},
 		  up_function_features => {'C',up_function_features},
 		  user_plane_ip_resource_information =>
 		      {'O',user_plane_ip_resource_information}},
 	    association_update_request =>
-		#{cp_function_features => {'O',cp_function_features},
+		#{alternative_smf_ip_address => {'O',alternative_smf_ip_address},
+		  cp_function_features => {'O',cp_function_features},
 		  graceful_release_period => {'O',graceful_release_period},
 		  node_id => {'M',node_id},
 		  pfcp_association_release_request => {'O',pfcp_association_release_request},
+		  pfcpaureq_flags => {'O',pfcpaureq_flags},
 		  up_function_features => {'O',up_function_features},
 		  user_plane_ip_resource_information =>
 		      {'O',user_plane_ip_resource_information}},
@@ -3654,7 +4505,7 @@ v1_msg_defs() ->
 					  {'C',transport_level_marking}}}}},
 		  create_pdr =>
 		      {'M',
-			  #{activate_predefined_rules_ => {'C',activate_predefined_rules_},
+			  #{activate_predefined_rules => {'C',activate_predefined_rules},
 			    far_id => {'C',far_id},
 			    outer_header_removal => {'C',outer_header_removal},
 			    pdi =>
@@ -3695,9 +4546,7 @@ v1_msg_defs() ->
 		      {'C',
 			  #{additional_monitoring_time =>
 				{'O',
-				    #{event_quota => {'O',event_quota},
-				      event_threshold => {'O',event_threshold},
-				      monitoring_time => {'M',monitoring_time},
+				    #{monitoring_time => {'M',monitoring_time},
 				      subsequent_time_quota => {'O',subsequent_time_quota},
 				      subsequent_time_threshold =>
 					  {'O',subsequent_time_threshold},
@@ -3709,11 +4558,16 @@ v1_msg_defs() ->
 				{'C',
 				    #{aggregated_urr_id => {'M',aggregated_urr_id},
 				      multiplier => {'M',multiplier}}},
+			    event_information =>
+				{'O',
+				    #{event_id => {'O',event_id},
+				      event_quota => {'O',event_quota},
+				      event_threshold => {'O',event_threshold}}},
 			    event_quota => {'C',event_quota},
 			    event_threshold => {'C',event_threshold},
 			    far_id => {'C',far_id},
 			    inactivity_detection_time => {'C',inactivity_detection_time},
-			    linked_urr_id_ => {'C',linked_urr_id_},
+			    linked_urr_id => {'C',linked_urr_id},
 			    measurement_information => {'C',measurement_information},
 			    measurement_method => {'M',measurement_method},
 			    measurement_period => {'C',measurement_period},
@@ -3740,7 +4594,8 @@ v1_msg_defs() ->
 		  user_id => {'O',user_id},
 		  user_plane_inactivity_timer => {'O',user_plane_inactivity_timer}},
 	    session_establishment_response =>
-		#{created_pdr => {'C',#{f_teid => {'C',f_teid},pdr_id => {'M',pdr_id}}},
+		#{apn_dnn => {'O',apn_dnn},
+		  created_pdr => {'C',#{f_teid => {'C',f_teid},pdr_id => {'M',pdr_id}}},
 		  created_traffic_endpoint =>
 		      {'C',
 			  #{f_teid => {'C',f_teid},
@@ -3780,12 +4635,13 @@ v1_msg_defs() ->
 				      network_instance => {'O',network_instance},
 				      outer_header_creation => {'C',outer_header_creation},
 				      redirect_information => {'C',redirect_information},
+				      tgpp_interface_type => {'C',tgpp_interface_type},
 				      traffic_endpoint_id => {'C',traffic_endpoint_id},
 				      transport_level_marking =>
 					  {'C',transport_level_marking}}}}},
 		  create_pdr =>
 		      {'C',
-			  #{activate_predefined_rules_ => {'C',activate_predefined_rules_},
+			  #{activate_predefined_rules => {'C',activate_predefined_rules},
 			    far_id => {'C',far_id},
 			    outer_header_removal => {'C',outer_header_removal},
 			    pdi =>
@@ -3844,7 +4700,7 @@ v1_msg_defs() ->
 			    event_threshold => {'C',event_threshold},
 			    far_id => {'C',far_id},
 			    inactivity_detection_time => {'C',inactivity_detection_time},
-			    linked_urr_id_ => {'C',linked_urr_id_},
+			    linked_urr_id => {'C',linked_urr_id},
 			    measurement_information => {'C',measurement_information},
 			    measurement_method => {'M',measurement_method},
 			    measurement_period => {'C',measurement_period},
@@ -3895,14 +4751,14 @@ v1_msg_defs() ->
 				      outer_header_creation => {'C',outer_header_creation},
 				      redirect_information => {'C',redirect_information},
 				      sxsmreq_flags => {'C',sxsmreq_flags},
+				      tgpp_interface_type => {'C',tgpp_interface_type},
 				      traffic_endpoint_id => {'C',traffic_endpoint_id},
 				      transport_level_marking =>
 					  {'C',transport_level_marking}}}}},
 		  update_pdr =>
 		      {'C',
-			  #{activate_predefined_rules_ => {'C',activate_predefined_rules_},
-			    deactivate_predefined_rules_ =>
-				{'C',deactivate_predefined_rules_},
+			  #{activate_predefined_rules => {'C',activate_predefined_rules},
+			    deactivate_predefined_rules => {'C',deactivate_predefined_rules},
 			    far_id => {'C',far_id},
 			    outer_header_removal => {'C',outer_header_removal},
 			    pdi =>
@@ -3940,13 +4796,24 @@ v1_msg_defs() ->
 			    ue_ip_address => {'C',ue_ip_address}}},
 		  update_urr =>
 		      {'C',
-			  #{additional_monitoring_time => {'O',additional_monitoring_time},
+			  #{additional_monitoring_time =>
+				{'O',
+				    #{event_quota => {'O',event_quota},
+				      event_threshold => {'O',event_threshold},
+				      monitoring_time => {'M',monitoring_time},
+				      subsequent_time_quota => {'O',subsequent_time_quota},
+				      subsequent_time_threshold =>
+					  {'O',subsequent_time_threshold},
+				      subsequent_volume_quota =>
+					  {'O',subsequent_volume_quota},
+				      subsequent_volume_threshold =>
+					  {'O',subsequent_volume_threshold}}},
 			    aggregated_urrs => {'C',aggregated_urrs},
 			    event_quota => {'C',event_quota},
 			    event_threshold => {'C',event_threshold},
 			    far_id => {'C',far_id},
 			    inactivity_detection_time => {'C',inactivity_detection_time},
-			    linked_urr_id_ => {'C',linked_urr_id_},
+			    linked_urr_id => {'C',linked_urr_id},
 			    measurement_information => {'C',measurement_information},
 			    measurement_method => {'C',measurement_method},
 			    measurement_period => {'C',measurement_period},
@@ -3969,12 +4836,22 @@ v1_msg_defs() ->
 	    session_modification_response =>
 		#{additional_usage_reports_information =>
 		      {'C',additional_usage_reports_information},
-		  created_pdr => {'C',created_pdr},
-		  created_traffic_endpoint => {'C',created_traffic_endpoint},
+		  created_pdr => {'C',#{f_teid => {'C',f_teid},pdr_id => {'M',pdr_id}}},
+		  created_traffic_endpoint =>
+		      {'C',
+			  #{f_teid => {'C',f_teid},
+			    traffic_endpoint_id => {'M',traffic_endpoint_id}}},
 		  failed_rule_id => {'C',failed_rule_id},
-		  load_control_information => {'O',load_control_information},
+		  load_control_information =>
+		      {'O',
+			  #{metric => {'M',metric},sequence_number => {'M',sequence_number}}},
 		  offending_ie => {'C',offending_ie},
-		  overload_control_information => {'O',overload_control_information},
+		  overload_control_information =>
+		      {'O',
+			  #{metric => {'M',metric},
+			    oci_flags => {'C',oci_flags},
+			    sequence_number => {'M',sequence_number},
+			    timer => {'M',timer}}},
 		  pfcp_cause => {'M',pfcp_cause},
 		  usage_report_smr =>
 		      {'C',
@@ -3995,6 +4872,7 @@ v1_msg_defs() ->
 		  error_indication_report => {'C',#{f_teid => {'M',f_teid}}},
 		  load_control_information => {'O',load_control_information},
 		  overload_control_information => {'O',overload_control_information},
+		  pfcpsrreq_flags => {'C',pfcpsrreq_flags},
 		  report_type => {'M',report_type},
 		  usage_report_srr =>
 		      {'C',
@@ -4006,7 +4884,7 @@ v1_msg_defs() ->
 				      flow_information => {'C',flow_information}}},
 			    duration_measurement => {'C',duration_measurement},
 			    end_time => {'C',end_time},
-			    event_time_stamp_ => {'C',event_time_stamp_},
+			    event_time_stamp => {'C',event_time_stamp},
 			    query_urr_reference => {'C',query_urr_reference},
 			    start_time => {'C',start_time},
 			    time_of_first_packet => {'C',time_of_first_packet},
@@ -4037,18 +4915,22 @@ v1_msg_defs() ->
 		  user_plane_ip_resource_information =>
 		      {'O',user_plane_ip_resource_information}},
 	    association_setup_response =>
-		#{cp_function_features => {'C',cp_function_features},
+		#{alternative_smf_ip_address => {'O',alternative_smf_ip_address},
+		  cp_function_features => {'C',cp_function_features},
 		  node_id => {'M',node_id},
 		  pfcp_cause => {'M',pfcp_cause},
 		  recovery_time_stamp => {'M',recovery_time_stamp},
+		  ue_ip_address_pool_identity => {'O',ue_ip_address_pool_identity},
 		  up_function_features => {'C',up_function_features},
 		  user_plane_ip_resource_information =>
 		      {'O',user_plane_ip_resource_information}},
 	    association_update_request =>
-		#{cp_function_features => {'O',cp_function_features},
+		#{alternative_smf_ip_address => {'O',alternative_smf_ip_address},
+		  cp_function_features => {'O',cp_function_features},
 		  graceful_release_period => {'O',graceful_release_period},
 		  node_id => {'M',node_id},
 		  pfcp_association_release_request => {'O',pfcp_association_release_request},
+		  pfcpaureq_flags => {'O',pfcpaureq_flags},
 		  up_function_features => {'O',up_function_features},
 		  user_plane_ip_resource_information =>
 		      {'O',user_plane_ip_resource_information}},
@@ -4104,7 +4986,7 @@ v1_msg_defs() ->
 				      redirect_information => {'C',redirect_information}}}}},
 		  create_pdr =>
 		      {'M',
-			  #{activate_predefined_rules_ => {'C',activate_predefined_rules_},
+			  #{activate_predefined_rules => {'C',activate_predefined_rules},
 			    far_id => {'C',far_id},
 			    pdi =>
 				{'M',
@@ -4134,9 +5016,7 @@ v1_msg_defs() ->
 		      {'C',
 			  #{additional_monitoring_time =>
 				{'O',
-				    #{event_quota => {'O',event_quota},
-				      event_threshold => {'O',event_threshold},
-				      monitoring_time => {'M',monitoring_time},
+				    #{monitoring_time => {'M',monitoring_time},
 				      subsequent_time_quota => {'O',subsequent_time_quota},
 				      subsequent_time_threshold =>
 					  {'O',subsequent_time_threshold},
@@ -4144,11 +5024,16 @@ v1_msg_defs() ->
 					  {'O',subsequent_volume_quota},
 				      subsequent_volume_threshold =>
 					  {'O',subsequent_volume_threshold}}},
+			    event_information =>
+				{'O',
+				    #{event_id => {'O',event_id},
+				      event_quota => {'O',event_quota},
+				      event_threshold => {'O',event_threshold}}},
 			    event_quota => {'C',event_quota},
 			    event_threshold => {'C',event_threshold},
 			    far_id => {'C',far_id},
 			    inactivity_detection_time => {'C',inactivity_detection_time},
-			    linked_urr_id_ => {'C',linked_urr_id_},
+			    linked_urr_id => {'C',linked_urr_id},
 			    measurement_information => {'C',measurement_information},
 			    measurement_method => {'M',measurement_method},
 			    measurement_period => {'C',measurement_period},
@@ -4200,7 +5085,7 @@ v1_msg_defs() ->
 				      redirect_information => {'C',redirect_information}}}}},
 		  create_pdr =>
 		      {'C',
-			  #{activate_predefined_rules_ => {'C',activate_predefined_rules_},
+			  #{activate_predefined_rules => {'C',activate_predefined_rules},
 			    far_id => {'C',far_id},
 			    pdi =>
 				{'M',
@@ -4244,7 +5129,7 @@ v1_msg_defs() ->
 			    event_threshold => {'C',event_threshold},
 			    far_id => {'C',far_id},
 			    inactivity_detection_time => {'C',inactivity_detection_time},
-			    linked_urr_id_ => {'C',linked_urr_id_},
+			    linked_urr_id => {'C',linked_urr_id},
 			    measurement_information => {'C',measurement_information},
 			    measurement_method => {'M',measurement_method},
 			    measurement_period => {'C',measurement_period},
@@ -4286,9 +5171,8 @@ v1_msg_defs() ->
 				      redirect_information => {'C',redirect_information}}}}},
 		  update_pdr =>
 		      {'C',
-			  #{activate_predefined_rules_ => {'C',activate_predefined_rules_},
-			    deactivate_predefined_rules_ =>
-				{'C',deactivate_predefined_rules_},
+			  #{activate_predefined_rules => {'C',activate_predefined_rules},
+			    deactivate_predefined_rules => {'C',deactivate_predefined_rules},
 			    far_id => {'C',far_id},
 			    pdi =>
 				{'C',
@@ -4316,12 +5200,23 @@ v1_msg_defs() ->
 			    ue_ip_address => {'C',ue_ip_address}}},
 		  update_urr =>
 		      {'C',
-			  #{additional_monitoring_time => {'O',additional_monitoring_time},
+			  #{additional_monitoring_time =>
+				{'O',
+				    #{event_quota => {'O',event_quota},
+				      event_threshold => {'O',event_threshold},
+				      monitoring_time => {'M',monitoring_time},
+				      subsequent_time_quota => {'O',subsequent_time_quota},
+				      subsequent_time_threshold =>
+					  {'O',subsequent_time_threshold},
+				      subsequent_volume_quota =>
+					  {'O',subsequent_volume_quota},
+				      subsequent_volume_threshold =>
+					  {'O',subsequent_volume_threshold}}},
 			    event_quota => {'C',event_quota},
 			    event_threshold => {'C',event_threshold},
 			    far_id => {'C',far_id},
 			    inactivity_detection_time => {'C',inactivity_detection_time},
-			    linked_urr_id_ => {'C',linked_urr_id_},
+			    linked_urr_id => {'C',linked_urr_id},
 			    measurement_method => {'C',measurement_method},
 			    measurement_period => {'C',measurement_period},
 			    monitoring_time => {'C',monitoring_time},
@@ -4343,9 +5238,16 @@ v1_msg_defs() ->
 		#{additional_usage_reports_information =>
 		      {'C',additional_usage_reports_information},
 		  failed_rule_id => {'C',failed_rule_id},
-		  load_control_information => {'O',load_control_information},
+		  load_control_information =>
+		      {'O',
+			  #{metric => {'M',metric},sequence_number => {'M',sequence_number}}},
 		  offending_ie => {'C',offending_ie},
-		  overload_control_information => {'O',overload_control_information},
+		  overload_control_information =>
+		      {'O',
+			  #{metric => {'M',metric},
+			    oci_flags => {'C',oci_flags},
+			    sequence_number => {'M',sequence_number},
+			    timer => {'M',timer}}},
 		  pfcp_cause => {'M',pfcp_cause},
 		  usage_report_smr =>
 		      {'C',
@@ -4365,6 +5267,7 @@ v1_msg_defs() ->
 		      {'C',additional_usage_reports_information},
 		  load_control_information => {'O',load_control_information},
 		  overload_control_information => {'O',overload_control_information},
+		  pfcpsrreq_flags => {'C',pfcpsrreq_flags},
 		  report_type => {'M',report_type},
 		  usage_report_srr =>
 		      {'C',
@@ -4376,7 +5279,7 @@ v1_msg_defs() ->
 				      flow_information => {'C',flow_information}}},
 			    duration_measurement => {'C',duration_measurement},
 			    end_time => {'C',end_time},
-			    event_time_stamp_ => {'C',event_time_stamp_},
+			    event_time_stamp => {'C',event_time_stamp},
 			    network_instance => {'C',network_instance},
 			    query_urr_reference => {'C',query_urr_reference},
 			    start_time => {'C',start_time},

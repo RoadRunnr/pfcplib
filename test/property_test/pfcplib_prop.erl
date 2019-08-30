@@ -153,6 +153,21 @@ dns_name() ->
     ?LET(L, dns_name_list(),
 	 [list_to_binary(X) || X <- L]).
 
+mcc() ->
+    ?LET(I, integer(1,999), integer_to_binary(I)).
+
+mcc_label() ->
+    ?LET(I, mcc(), list_to_binary(io_lib:format("mcc~3..0s", [I]))).
+
+mnc() ->
+    ?LET(I, integer(1,999), integer_to_binary(I)).
+
+mnc_label() ->
+    ?LET(I, mnc(), list_to_binary(io_lib:format("mnc~3..0s", [I]))).
+
+apn() ->
+    ?LET(L, [dns_name(), mnc_label(), mcc_label(), <<"gprs">>], lists:flatten(L)).
+
 uint8() ->
     integer(0,16#ff).
 
@@ -377,7 +392,43 @@ simple_ie() ->
      gen_mac_addresses_detected(),
      gen_mac_addresses_removed(),
      gen_ethernet_inactivity_timer(),
+     gen_additional_monitoring_time(),
+     gen_event_quota(),
+     gen_event_threshold(),
+     gen_subsequent_event_quota(),
+     gen_subsequent_event_threshold(),
+     gen_trace_information(),
+     gen_framed_route(),
+     gen_framed_routing(),
+     gen_framed_ipv6_route(),
+     gen_event_time_stamp(),
+     gen_averaging_window(),
+     gen_paging_policy_indicator(),
+     gen_apn_dnn(),
+     gen_tgpp_interface_type(),
+     gen_pfcpsrreq_flags(),
+     gen_pfcpaureq_flags(),
+     gen_activation_time(),
+     gen_deactivation_time(),
+     gen_create_mar(),
+     gen_access_forwarding_action_information_1(),
+     gen_access_forwarding_action_information_2(),
+     gen_remove_mar(),
+     gen_update_mar(),
+     gen_mar_id(),
+     gen_steering_functionality(),
+     gen_steering_mode(),
+     gen_weight(),
+     gen_priority(),
+     gen_update_access_forwarding_action_information_1(),
+     gen_update_access_forwarding_action_information_2(),
+     gen_ue_ip_address_pool_identity(),
+     gen_alternative_smf_ip_address(),
      gen_tp_packet_measurement(),
+     gen_tp_build_id(),
+     gen_tp_now(),
+     gen_tp_start(),
+     gen_tp_stop(),
      gen_enterprise_priv()
     ].
 
@@ -494,12 +545,17 @@ gen_source_interface() ->
       }.
 
 gen_f_teid() ->
-    #f_teid{
-       teid = uint32(),
-       ipv6 = oneof([undefined, ip6_address()]),
-       ipv4 = oneof([undefined, ip4_address()]),
-       choose_id = byte()
-}.
+    oneof([#f_teid{
+	      teid = uint32(),
+	      ipv6 = oneof([undefined, ip6_address()]),
+	      ipv4 = oneof([undefined, ip4_address()])
+	     },
+	   #f_teid{
+	      teid = choose,
+	      ipv6 = oneof([undefined, choose]),
+	      ipv4 = oneof([undefined, choose]),
+	      choose_id = oneof([undefined, byte()])
+	     }]).
 
 gen_network_instance() ->
     #network_instance{
@@ -589,6 +645,8 @@ gen_reporting_triggers() ->
        time_threshold = flag(),
        volume_threshold = flag(),
        periodic_reporting = flag(),
+       event_quota = flag(),
+       event_threshold = flag(),
        mac_addresses_reporting = flag(),
        envelope_closure = flag(),
        time_quota = flag(),
@@ -600,7 +658,8 @@ gen_redirect_information() ->
        type = oneof(['IPv4',
 		     'IPv6',
 		     'URL',
-		     'SIP URI']),
+		     'SIP URI',
+		     'IPv4 and IPv6']),
        address = binary()
       }.
 
@@ -640,10 +699,18 @@ gen_up_function_features() ->
        dlbd = flag(),
        ddnd = flag(),
        bucp = flag(),
+       epfar = flag(),
+       pfde = flag(),
+       frrt = flag(),
+       trace = flag(),
        quoac = flag(),
        udbc = flag(),
        pdiu = flag(),
-       empu = flag()
+       empu = flag(),
+       sset = flag(),
+       ueip = flag(),
+       adpdp = flag(),
+       dpdra = flag()
       }.
 
 gen_apply_action() ->
@@ -657,7 +724,8 @@ gen_apply_action() ->
 
 gen_downlink_data_service_information() ->
     #downlink_data_service_information{
-       value = oneof(['undefined', uint8()])
+       value = oneof(['undefined', uint8()]),
+       qfi = oneof(['undefined', uint8()])
       }.
 
 gen_downlink_data_notification_delay() ->
@@ -756,7 +824,11 @@ gen_pfd_contents() ->
 	  flow = oneof(['undefined', binary()]),
 	  url = oneof(['undefined', binary()]),
 	  domain = oneof(['undefined', binary()]),
-	  custom = oneof(['undefined', binary()])
+	  custom = oneof(['undefined', binary()]),
+	  dnp = oneof(['undefined', binary()]),
+	  additional_flow = oneof(['undefined', list(binary())]),
+	  additional_url = oneof(['undefined', list(binary())]),
+	  additional_domain = oneof(['undefined', list(binary())])
       }.
 
 gen_measurement_method() ->
@@ -776,14 +848,17 @@ gen_usage_report_trigger() ->
 	  timth = flag(),
 	  volth = flag(),
 	  perio = flag(),
+	  eveth = flag(),
 	  macar = flag(),
 	  envcl = flag(),
 	  monit = flag(),
 	  termr = flag(),
 	  liusa = flag(),
 	  timqu = flag(),
-	  volqu = flag()
-}.
+	  volqu = flag(),
+	  tebur = flag(),
+	  evequ = flag()
+   }.
 
 gen_measurement_period() ->
     #measurement_period{
@@ -829,7 +904,8 @@ gen_quota_holding_time() ->
 
 gen_dropped_dl_traffic_threshold() ->
     #dropped_dl_traffic_threshold{
-      value = oneof(['undefined', uint64()])
+      packets = oneof(['undefined', uint64()]),
+      bytes = oneof(['undefined', uint64()])
       }.
 
 gen_volume_quota() ->
@@ -883,6 +959,18 @@ gen_outer_header_creation() ->
 	  type = 'UDP', ipv4 = ip4_address(), port = uint16()},
        #outer_header_creation{
 	  type = 'UDP', ipv6 = ip6_address(), port = uint16()}
+       #outer_header_creation{
+	  type = 'IP', ipv4 = ip4_address()},
+       #outer_header_creation{
+	  type = 'IP', ipv6 = ip6_address()},
+       #outer_header_creation{
+	  type = 'Ethernet',
+	  ctag = oneof([undefined, binary(3)]),
+	  stag = binary(3)},
+       #outer_header_creation{
+	  type = 'Ethernet',
+	  ctag = binary(3),
+	  stag = oneof([undefined, binary(3)])}
       ]).
 
 gen_create_bar() ->
@@ -899,6 +987,8 @@ gen_bar_id() ->
 
 gen_cp_function_features() ->
     #cp_function_features{
+       sset = flag(),
+       epfar = flag(),
        ovrl = flag(),
        load = flag()
       }.
@@ -928,11 +1018,18 @@ gen_flow_information() ->
       }.
 
 gen_ue_ip_address() ->
-    #ue_ip_address{
-       type = oneof([undefined, src, dst]),
-       ipv4 = oneof([undefined, ip4_address()]),
-       ipv6 = oneof([undefined, ip6_address()])
-      }.
+    oneof([#ue_ip_address{
+	      type = oneof([undefined, src, dst]),
+	      ipv4 = oneof([undefined, ip4_address()]),
+	      ipv6 = oneof([undefined, ip6_address()]),
+	      ipv6_pd_bits = oneof([undefined, integer(0,128)])
+	     },
+	   #ue_ip_address{
+	      type = oneof([undefined, src, dst]),
+	      ipv4 = oneof([undefined, choose]),
+	      ipv6 = oneof([undefined, choose]),
+	      ipv6_pd_bits = oneof([undefined, integer(0,128)])
+	     }]).
 
 gen_packet_rate() ->
     Unit = oneof([undefined, 'minute','6 minutes', 'hour', 'day', 'week']),
@@ -950,7 +1047,13 @@ gen_outer_header_removal() ->
 	     ['GTP-U/UDP/IPv4',
 	      'GTP-U/UDP/IPv6',
 	      'UDP/IPv4',
-	      'UDP/IPv6'])
+	      'UDP/IPv6',
+	      'IPv4',
+	      'IPv6',
+	      'GTP-U/UDP/IP',
+	      'VLAN S-TAG',
+	      'S-TAG and C-TAG']),
+       pdu_session_container = flag()
       }.
 
 gen_recovery_time_stamp() ->
@@ -976,6 +1079,7 @@ gen_error_indication_report() ->
 
 gen_measurement_information() ->
     #measurement_information{
+       istm = flag(),
        radi = flag(),
        inam = flag(),
        mbqe = flag()
@@ -992,7 +1096,13 @@ gen_user_plane_path_failure_report() ->
 gen_remote_gtp_u_peer() ->
     #remote_gtp_u_peer{
        ipv4 = oneof([undefined, ip4_address()]),
-       ipv6 = oneof([undefined, ip6_address()])
+       ipv6 = oneof([undefined, ip6_address()]),
+       destination_interface = oneof([undefined,
+				      'Access',
+				      'Core',
+				      'SGi-LAN',
+				      'CP-function']),
+       network_instance = oneof([undefined, binary()])
       }.
 
 gen_ur_seqn() ->
@@ -1026,6 +1136,7 @@ gen_oci_flags() ->
 
 gen_sx_association_release_request() ->
     #sx_association_release_request{
+       urss = flag(),
        sarr = flag()
       }.
 
@@ -1105,7 +1216,7 @@ gen_rqi() ->
 
 gen_qfi() ->
     #qfi{
-       qfi = uint8()
+       qfi = integer(0,63)
       }.
 
 gen_query_urr_reference() ->
@@ -1190,7 +1301,9 @@ gen_suggested_buffering_packets_count() ->
 gen_user_id() ->
     #user_id{
        imsi = oneof(['undefined', imsi()]),
-       imei = oneof(['undefined', imei(), imeisv()])
+       imei = oneof(['undefined', imei(), imeisv()]),
+       msisdn = oneof(['undefined', binary()]),
+       nai = oneof(['undefined', binary()])
       }.
 
 gen_ethernet_pdu_session_information() ->
@@ -1216,8 +1329,199 @@ gen_ethernet_inactivity_timer() ->
        timer = uint32()
       }.
 
+gen_additional_monitoring_time() ->
+    #additional_monitoring_time{group = ie_group()}.
+
+gen_event_quota() ->
+    #event_quota{
+       quota = uint32()
+      }.
+
+gen_event_threshold() ->
+    #event_threshold{
+       threshold = uint32()
+      }.
+
+gen_subsequent_event_quota() ->
+    #subsequent_event_quota{
+       quota = uint32()
+      }.
+
+gen_subsequent_event_threshold() ->
+    #subsequent_event_threshold{
+       threshold = uint32()
+      }.
+
+gen_trace_information() ->
+    #trace_information{
+       mccmnc = {mcc(), mnc()},
+       trace_id = uint24(),
+       triggering_events = binary(2),
+       session_trace_depth = uint8(),
+       list_of_interfaces = binary(2),
+       ip_address_of_trace_collection_entity =
+	   oneof([ip4_address(), ip6_address()])
+      }.
+
+gen_framed_route() ->
+    #framed_route{
+       framed_route = binary()
+      }.
+
+gen_framed_routing() ->
+    #framed_routing{
+       framed_routing = uint8()
+      }.
+
+gen_framed_ipv6_route() ->
+    #framed_ipv6_route{
+       framed_ipv6_route = binary()
+      }.
+
+gen_event_time_stamp() ->
+    #event_time_stamp{
+       time = uint32()
+      }.
+
+gen_averaging_window() ->
+    #averaging_window{
+       averaging_window = uint32()
+      }.
+
+gen_paging_policy_indicator() ->
+    #paging_policy_indicator{
+       ppi = integer(0,15)
+      }.
+
+gen_apn_dnn() ->
+    #apn_dnn{
+       apn_dnn = apn()
+      }.
+
+gen_tgpp_interface_type() ->
+    #tgpp_interface_type{
+       tgpp_interface_type =
+	   oneof(
+	     ['S1-U', 'S5/S8-U', 'S4-U', 'S11-U', 'S12-U',
+	      'Gn/Gp-U', 'S2a-U', 'S2b-U',
+	      'eNodeB GTP-U interface for DL data forwarding',
+	      'eNodeB GTP-U interface for UL data forwarding',
+	      'SGW/UPF GTP-U interface for DL data forwarding',
+	      'N3 3GPP Access',
+	      'N3 Trusted Non-3GPP Access',
+	      'N3 Untrusted Non-3GPP Access',
+	      'N3 for data forwarding',
+	      'N9'])
+      }.
+
+gen_pfcpsrreq_flags() ->
+    #pfcpsrreq_flags{
+       psdbu = flag()
+      }.
+
+gen_pfcpaureq_flags() ->
+    #pfcpaureq_flags{
+       parps = flag()
+      }.
+
+gen_activation_time() ->
+    #activation_time{
+       time = uint32()
+      }.
+
+gen_deactivation_time() ->
+    #deactivation_time{
+       time = uint32()
+      }.
+
+gen_create_mar() ->
+    #create_mar{group = ie_group()}.
+
+gen_access_forwarding_action_information_1() ->
+    #access_forwarding_action_information_1{group = ie_group()}.
+
+gen_access_forwarding_action_information_2() ->
+    #access_forwarding_action_information_2{group = ie_group()}.
+
+gen_remove_mar() ->
+    #remove_mar{group = ie_group()}.
+
+gen_update_mar() ->
+    #update_mar{group = ie_group()}.
+
+gen_mar_id() ->
+    #mar_id{
+       id = uint16()
+      }.
+
+gen_steering_functionality() ->
+    #steering_functionality{
+       steering_functionality =
+	   oneof(['ATSSS-LL', 'MPTCP'])
+      }.
+
+gen_steering_mode() ->
+    #steering_mode{
+       steering_mode =
+	   oneof(['Active-Standby',
+		  'Smallest Delay',
+		  'Load Balancing',
+		  'Priority-based'])
+      }.
+
+gen_weight() ->
+    #weight{
+       weight = uint32()
+      }.
+
+gen_priority() ->
+    #priority{
+       priority_value =
+	   oneof(['Active', 'Standby', 'High', 'Low'])
+      }.
+
+gen_update_access_forwarding_action_information_1() ->
+    #update_access_forwarding_action_information_1{group = ie_group()}.
+
+gen_update_access_forwarding_action_information_2() ->
+    #update_access_forwarding_action_information_2{group = ie_group()}.
+
+
+gen_ue_ip_address_pool_identity() ->
+    #ue_ip_address_pool_identity{
+       identity = binary()
+      }.
+
+gen_alternative_smf_ip_address() ->
+    #alternative_smf_ip_address{
+       ipv4 = oneof([undefined, ip4_address()]),
+       ipv6 = oneof([undefined, ip6_address()])
+     }.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%5
+
 gen_tp_packet_measurement() ->
     gen_volume(tp_packet_measurement).
+
+gen_tp_build_id() ->
+    #tp_build_id{
+       id = binary()
+      }.
+
+gen_tp_now() ->
+    #tp_now{
+       now = {uint32(), uint32()}
+      }.
+
+gen_tp_start() ->
+    #tp_start{
+       start = {uint32(), uint32()}
+      }.
+
+gen_tp_stop() ->
+    #tp_stop{
+       stop = {uint32(), uint32()}
+      }.
 
 gen_enterprise_priv() ->
     {{18681, 500}, binary()}.
